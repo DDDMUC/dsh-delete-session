@@ -71,7 +71,7 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 
 ### 已知限制
 
-- 被 DSH 当前打开占用的会话无法删除：运行时没有公开的写所有权释放入口，会明确提示「重启 DSH 后再试」
+- 被 DSH 当前打开占用的会话：删除会自动等待写所有权释放（通常几秒）后完成；极少数仍被占用的情况会提示稍后重试或重启 DSH
 - 菜单注入是 DOM shim：核心 UI 若调整菜单结构或行 fiber 形状，可能不再注入菜单项（不影响其他功能）
 - 删除不可恢复：没有回收站，也没有撤销
 
@@ -153,7 +153,7 @@ Restart `dsh web` to apply.
 
 ### Known limitations
 
-- A session that DSH currently holds open cannot be deleted: the runtime exposes no public way to release the write ownership, so the request is refused with a "restart DSH and retry" message
+- A session DSH currently holds open: the delete waits for the write lease to be released (usually a few seconds) and then completes; in the rare case it stays busy, the dialog asks you to retry later or restart DSH
 - The menu injection is a DOM shim: core UI changes to the menu markup or row fiber shape may stop the item from being injected (nothing else breaks)
 - Deletion is permanent: there is no trash bin and no undo
 

@@ -157,29 +157,43 @@ async function flushAndDetach(ctx, sessionId) {
 }
 
 // Probe the persistence write lease. Holding it proves no active writer is
-// around; it is released immediately. A busy lease means DSH still has the
-// session open (the runtime offers no public way to release it), so the
-// request is refused and the caller can retry after restarting DSH.
+// around; it is released immediately. Detaching a live session releases its
+// lease asynchronously (session/disposed starts a persistence retirement), so
+// the probe is retried with a short backoff before the request is refused -
+// in practice the first click then succeeds without forcing anything.
+const BUSY_RETRY_ATTEMPTS = 10
+const BUSY_RETRY_DELAY_MS = 500
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function assertNoActiveWriter(ctx, sessionId) {
   const sp = ctx.get('sessionPersistence')
   if (!sp || typeof sp.open !== 'function') return false
-  let handle = null
-  try {
-    handle = await sp.open(sessionId, 'write')
-  } catch (error) {
-    const message = String((error && error.message) || error)
-    if (/own|busy|lock|hold|writer/i.test(message)) {
-      throw new HttpError(409, 'busy', 'session is currently open in DSH')
-    }
-    return false
-  } finally {
+  for (let attempt = 1; attempt <= BUSY_RETRY_ATTEMPTS; attempt += 1) {
+    let handle = null
+    let busy = false
     try {
-      if (handle && typeof handle.close === 'function') await handle.close()
-    } catch {
-      // lease release failure is harmless: the directory is removed next
+      handle = await sp.open(sessionId, 'write')
+    } catch (error) {
+      const message = String((error && error.message) || error)
+      if (/own|busy|lock|hold|writer/i.test(message)) {
+        busy = true
+      } else {
+        return false
+      }
+    } finally {
+      try {
+        if (handle && typeof handle.close === 'function') await handle.close()
+      } catch {
+        // lease release failure is harmless: the directory is removed next
+      }
     }
+    if (!busy) return true
+    if (attempt < BUSY_RETRY_ATTEMPTS) await sleep(BUSY_RETRY_DELAY_MS)
   }
-  return true
+  throw new HttpError(409, 'busy', 'session is currently open in DSH')
 }
 
 async function detachFromWorkspace(ctx, sessionId) {

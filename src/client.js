@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
       dontAsk: '不再询问，以后直接删除',
       done: '已删除会话',
       failed: '删除失败：',
-      busy: '该会话正被 DSH 打开，暂时无法删除；请重启 DSH 后再试。',
+      busy: '该会话正被 DSH 打开，删除未能完成；请稍后重试（通常几秒后即可），或重启 DSH 后再试。',
       notFound: '未找到该会话（可能已被删除）。',
       untitled: '未命名会话',
     }
@@ -46,7 +46,7 @@ window.__ModuleLoader__.load({
       dontAsk: "Don't ask again",
       done: 'Session deleted',
       failed: 'Delete failed: ',
-      busy: 'This session is currently open in DSH and cannot be deleted yet. Restart DSH and try again.',
+      busy: 'This session is currently open in DSH; the delete did not complete. Try again in a moment (usually a few seconds), or restart DSH and retry.',
       notFound: 'Session not found (it may already be deleted).',
       untitled: 'Untitled session',
     }
