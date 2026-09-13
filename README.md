@@ -16,6 +16,10 @@ Built for DeepSeek Harness (DSH) Web, tested on `0.1.5-rc.1`.
   action always targets the row you clicked).
 - **Risk-consent dialog**: shows the session title and id; the confirm button
   stays disabled until the acknowledgement checkbox is ticked.
+- **Confirm once, then skip**: tick "Don't ask again" in the dialog and later
+  deletes run directly from the menu (a toast reports the result). Hold Shift
+  while clicking to force the dialog again, or clear
+  `localStorage['dsh-delete-session:skip-confirm']` to restore it permanently.
 - **Real deletion**: stops a running agent (cancel + quiescence), flushes and
   detaches the live session, removes every on-disk session directory (both the
   raw and `session-` prefixed id), verifies through the persistence service,

@@ -27,6 +27,7 @@ window.__ModuleLoader__.load({
       confirm: '删除',
       deleting: '删除中…',
       ack: '我已了解，永久删除',
+      dontAsk: '不再询问，以后直接删除',
       done: '已删除会话',
       failed: '删除失败：',
       busy: '该会话正被 DSH 打开，暂时无法删除；请重启 DSH 后再试。',
@@ -42,6 +43,7 @@ window.__ModuleLoader__.load({
       confirm: 'Delete',
       deleting: 'Deleting...',
       ack: 'I understand - delete permanently',
+      dontAsk: "Don't ask again",
       done: 'Session deleted',
       failed: 'Delete failed: ',
       busy: 'This session is currently open in DSH and cannot be deleted yet. Restart DSH and try again.',
@@ -51,6 +53,49 @@ window.__ModuleLoader__.load({
 
     let localeSvc = null
     let sessionsSvc = null
+
+    // Once the user ticks "don't ask again" the confirmation dialog is
+    // skipped and the menu item deletes directly. Shift+click always opens
+    // the dialog again, and clearing the key in localStorage restores it.
+    const SKIP_KEY = 'dsh-delete-session:skip-confirm'
+
+    function skipConfirm() {
+      try { return localStorage.getItem(SKIP_KEY) === '1' } catch { return false }
+    }
+
+    function setSkipConfirm() {
+      try { localStorage.setItem(SKIP_KEY, '1') } catch { /* private mode: ignore */ }
+    }
+
+    function postDelete(sessionId) {
+      return fetch('/dsh-delete-session/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) {
+          const code = data && data.code
+          const message = code === 'busy'
+            ? t('busy')
+            : code === 'not-found'
+              ? t('notFound')
+              : (data && data.error) || `HTTP ${res.status}`
+          throw new Error(message)
+        }
+        return data
+      })
+    }
+
+    function deleteNow(info) {
+      postDelete(info.id)
+        .then(() => {
+          toast(t('done'))
+          refreshList()
+        })
+        .catch((reason) => toast(t('failed') + String((reason && reason.message) || reason), true))
+    }
 
     function browserLang() {
       if (typeof navigator === 'undefined') return 'zh'
@@ -188,6 +233,15 @@ window.__ModuleLoader__.load({
       ack.appendChild(checkbox)
       ack.appendChild(ackText)
 
+      const skip = document.createElement('label')
+      skip.className = 'dsdel-ack'
+      const skipBox = document.createElement('input')
+      skipBox.type = 'checkbox'
+      const skipText = document.createElement('span')
+      skipText.textContent = t('dontAsk')
+      skip.appendChild(skipBox)
+      skip.appendChild(skipText)
+
       const error = document.createElement('p')
       error.className = 'dsdel-error'
       error.style.display = 'none'
@@ -210,6 +264,7 @@ window.__ModuleLoader__.load({
       dialog.appendChild(meta)
       dialog.appendChild(text)
       dialog.appendChild(ack)
+      dialog.appendChild(skip)
       dialog.appendChild(error)
       dialog.appendChild(actions)
       backdrop.appendChild(dialog)
@@ -232,23 +287,9 @@ window.__ModuleLoader__.load({
         cancel.disabled = true
         confirm.textContent = t('deleting')
         error.style.display = 'none'
-        fetch('/dsh-delete-session/delete', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: info.id }),
-        })
-          .then(async (res) => {
-            let data = {}
-            try { data = await res.json() } catch { /* keep {} */ }
-            if (!res.ok || !data.ok) {
-              const code = data && data.code
-              const message = code === 'busy'
-                ? t('busy')
-                : code === 'not-found'
-                  ? t('notFound')
-                  : (data && data.error) || `HTTP ${res.status}`
-              throw new Error(message)
-            }
+        if (skipBox.checked) setSkipConfirm()
+        postDelete(info.id)
+          .then(() => {
             backdrop.remove()
             toast(t('done'))
             refreshList()
@@ -298,7 +339,8 @@ window.__ModuleLoader__.load({
         e.stopPropagation()
         e.preventDefault()
         closeMenu()
-        openDialog(info)
+        if (skipConfirm() && !e.shiftKey) deleteNow(info)
+        else openDialog(info)
       })
       wrap.appendChild(button)
       viewport.appendChild(wrap)
