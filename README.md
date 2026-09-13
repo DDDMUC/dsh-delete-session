@@ -18,7 +18,7 @@
 
 ### 为什么需要它
 
-DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只是把会话藏起来，**不删数据**；而全家桶里的「会话归档管理」在设置深处，删一个会话要跳好几个界面。
+DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只是把会话藏起来，**不删数据**；而插件dsh-web里的全家桶里的「会话归档管理」在设置深处，删一个会话要跳好几个界面。
 
 这个插件把「删除」放回你最常点的位置：会话行的 `...` 菜单。
 
@@ -100,7 +100,7 @@ MIT
 
 ### Why you need it
 
-The DSH sidebar session menu only offers **Rename / Fork / Archive** — archive merely hides a session and keeps every byte on disk, while the bundled session archive manager lives deep in Settings and takes several screens to reach.
+The DSH sidebar session menu only offers **Rename / Fork / Archive** — archive merely hides a session and keeps every byte on disk, while the session archive manager inside the dsh-web plugin suite lives deep in Settings and takes several screens to reach.
 
 This plugin puts Delete back where you already click: the session row's `...` menu.
 
