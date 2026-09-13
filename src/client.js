@@ -118,7 +118,7 @@ window.__ModuleLoader__.load({
     function ensureStyle() {
       if (document.querySelector('style[data-dsh-delete-session]')) return
       const style = document.createElement('style')
-      style.dataset.dshSessionDelete = '1'
+      style.dataset.dshDeleteSession = '1'
       style.textContent = CSS
       document.head.appendChild(style)
     }
