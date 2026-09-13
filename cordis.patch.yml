@@ -1,7 +1,7 @@
-# dsh-session-delete bundle patch: inserts the plugin row into the profile
-# roster. The node half serves the /dsh-session-delete/* JSON routes; the
+# dsh-delete-session bundle patch: inserts the plugin row into the profile
+# roster. The node half serves the /dsh-delete-session/* JSON routes; the
 # browser half (exports "./client") injects the sidebar session-row menu item
 # and the confirmation dialog.
 - insert:
-    - id: dsh-session-delete
-      name: 'dsh-session-delete'
+    - id: dsh-delete-session
+      name: 'dsh-delete-session'

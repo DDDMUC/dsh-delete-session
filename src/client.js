@@ -1,4 +1,4 @@
-// dsh-session-delete - client half.
+// dsh-delete-session - client half.
 //
 // DSH's sidebar session-row "..." menu (rename / fork / archive) is rendered
 // by the core UI and offers no plugin slot for extra rows, so the delete item
@@ -8,16 +8,16 @@
 //   * walk the React fiber chain from that menu to the session node and read
 //     its real id (props.node.id) - no title matching, no conversation jump;
 //   * clone a native menu row so the new item keeps the core styling;
-//   * open a risk-consent dialog and POST /dsh-session-delete/delete.
+//   * open a risk-consent dialog and POST /dsh-delete-session/delete.
 //
 // The module is a classic client bundle (client-modules protocol): it
 // registers a factory with window.__ModuleLoader__ and returns apply().
 // No React, no SDK imports - theme tokens and DOM only, so it survives core
 // UI revisions that keep the menu contract.
 window.__ModuleLoader__.load({
-  id: 'dsh-session-delete',
+  id: 'dsh-delete-session',
   factory: () => {
-    const NS = 'dsh-session-delete'
+    const NS = 'dsh-delete-session'
 
     const zh = {
       menu: '删除会话',
@@ -116,7 +116,7 @@ window.__ModuleLoader__.load({
     ].join('')
 
     function ensureStyle() {
-      if (document.querySelector('style[data-dsh-session-delete]')) return
+      if (document.querySelector('style[data-dsh-delete-session]')) return
       const style = document.createElement('style')
       style.dataset.dshSessionDelete = '1'
       style.textContent = CSS
@@ -232,7 +232,7 @@ window.__ModuleLoader__.load({
         cancel.disabled = true
         confirm.textContent = t('deleting')
         error.style.display = 'none'
-        fetch('/dsh-session-delete/delete', {
+        fetch('/dsh-delete-session/delete', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ sessionId: info.id }),
@@ -269,7 +269,7 @@ window.__ModuleLoader__.load({
     const TRASH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M9 7V4h6v3"/></svg>'
 
     function augmentMenu(menuEl, info) {
-      if (menuEl.querySelector('[data-dsh-session-delete]')) return
+      if (menuEl.querySelector('[data-dsh-delete-session]')) return
       const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
       if (!viewport) return
       const proto = menuEl.querySelector('[role="menuitem"]')
@@ -281,7 +281,7 @@ window.__ModuleLoader__.load({
       const button = document.createElement('button')
       button.type = 'button'
       button.setAttribute('role', 'menuitem')
-      button.setAttribute('data-dsh-session-delete', '1')
+      button.setAttribute('data-dsh-delete-session', '1')
       if (proto.className) button.className = proto.className
       button.style.color = 'var(--dsw-alias-state-error-primary,#e5484d)'
 

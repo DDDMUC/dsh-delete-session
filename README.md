@@ -1,4 +1,4 @@
-# dsh-session-delete
+# dsh-delete-session
 
 English | [中文](README.zh.md)
 
@@ -31,7 +31,7 @@ Built for DeepSeek Harness (DSH) Web, tested on `0.1.5-rc.1`.
 ## Install
 
 ```sh
-dsh plugin --profile web add github:DDDMUC/dsh-session-delete
+dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 ```
 
 Then restart `dsh web`. The item appears in the sidebar session `...` menu.
@@ -39,7 +39,7 @@ Then restart `dsh web`. The item appears in the sidebar session `...` menu.
 ## How it works
 
 - `src/index.js` (host) registers one loopback-only route:
-  `POST /dsh-session-delete/delete` `{ sessionId }`.
+  `POST /dsh-delete-session/delete` `{ sessionId }`.
 - `src/client.js` (browser) is a classic client bundle: it watches for the
   portalled session menu (`body > [role="menu"]`), walks the React fiber chain
   to the session node (`props.node.id`), clones a native menu row for styling,

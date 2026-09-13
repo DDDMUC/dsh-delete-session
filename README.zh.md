@@ -1,4 +1,4 @@
-# dsh-session-delete
+# dsh-delete-session
 
 [English](README.md) | 中文
 
@@ -23,7 +23,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:DDDMUC/dsh-session-delete
+dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 ```
 
 重启 `dsh web` 后，在侧边栏会话 `...` 菜单中即可看到「删除会话」。
@@ -31,7 +31,7 @@ dsh plugin --profile web add github:DDDMUC/dsh-session-delete
 ## 工作原理
 
 - `src/index.js`（宿主）：注册一条仅限回环的路由
-  `POST /dsh-session-delete/delete` `{ sessionId }`。
+  `POST /dsh-delete-session/delete` `{ sessionId }`。
 - `src/client.js`（浏览器）：经典客户端 bundle——监听 portal 到 body 的会话菜单
   （`body > [role="menu"]`），沿 React fiber 链读取会话节点（`props.node.id`），
   克隆原生菜单行保持样式一致，然后打开确认对话框。

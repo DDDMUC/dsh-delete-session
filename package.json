@@ -1,5 +1,5 @@
 {
-  "name": "dsh-session-delete",
+  "name": "dsh-delete-session",
   "version": "0.1.1",
   "description": "Delete sessions from the DSH Web sidebar: adds a Delete action to the session row menu with a risk-consent dialog, then removes the session log, workspace accounting and live session state.",
   "type": "module",
@@ -26,7 +26,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DDDMUC/dsh-session-delete.git"
+    "url": "git+https://github.com/DDDMUC/dsh-delete-session.git"
   },
   "dsh": {
     "bundle": {

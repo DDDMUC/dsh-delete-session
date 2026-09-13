@@ -1,8 +1,8 @@
-// dsh-session-delete - host half.
+// dsh-delete-session - host half.
 //
 // One loopback-only HTTP route serves the client menu item:
 //
-//   POST /dsh-session-delete/delete   { sessionId }
+//   POST /dsh-delete-session/delete   { sessionId }
 //
 // Deletion pipeline, kept consistent with the live DSH services so in-memory
 // state and on-disk units cannot disagree after the request returns:
@@ -26,9 +26,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-export const name = 'dsh-session-delete'
+export const name = 'dsh-delete-session'
 
-const ROUTE_PREFIX = '/dsh-session-delete'
+const ROUTE_PREFIX = '/dsh-delete-session'
 const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 class HttpError extends Error {
