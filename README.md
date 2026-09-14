@@ -27,6 +27,7 @@ DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只
 - **菜单内删除** —— 侧边栏会话 `...` 菜单直接多出「删除会话」；会话 ID 从菜单的 React fiber 读取，永远作用于你点的那一行，**不会切换当前会话**
 - **风险确认** —— 首次删除弹出确认对话框：显示会话标题与 ID，勾选「我已了解，永久删除」后确认按钮才可用
 - **确认一次后可跳过** —— 对话框里勾选「不再询问，以后直接删除」，之后点菜单项直接删除（左下角 toast 提示）；**按住 Shift 点击**可临时恢复弹窗；清除 `localStorage['dsh-delete-session:skip-confirm']` 可永久恢复
+- **多选批量删除** —— 会话菜单里的「多选」进入选择模式：每行左侧出现勾选圈，点整行即勾选（不会打开会话），底部操作条显示「已选 N 个 / 取消 / 删除」；点删除**立即批量执行**（无确认弹窗、无全选、所有行都可选），完成后 toast 汇总并刷新列表；Esc 或「取消」退出
 - **真正的删除** —— 停止运行中的 agent（cancel + 等待空闲）→ flush / detach 活跃会话 → 删除磁盘会话目录（原始 ID 与 `session-` 前缀两种写法）→ 持久化服务复核 → 清理工作区记账，侧栏不会残留「未分组」孤儿
 - **默认安全** —— 宿主路由仅限本机回环（回环 socket + 回环 Host 头 + 同源校验）；被 DSH 打开占用的会话会被明确拒绝（409），绝不与活跃写者竞争
 - **中英双语** —— 菜单项与对话框跟随 DSH 界面语言（zh / en）
@@ -54,6 +55,7 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 2. 选择底部的「删除会话」
 3. 首次：勾选「我已了解，永久删除」（想省事可同时勾选「不再询问，以后直接删除」）→ 点「删除」
 4. 之后：直接删除，左下角出现 toast 提示
+5. 批量删除：会话菜单 →「多选」→ 勾选多个会话 → 底部「删除」；Esc 或「取消」退出选择模式
 
 <div align="center">
   <a href="https://raw.githubusercontent.com/DDDMUC/dsh-delete-session/main/assets/dialog.jpg">
@@ -74,6 +76,7 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 - 被 DSH 当前打开占用的会话：删除会自动等待写所有权释放（通常几秒）后完成；极少数仍被占用的情况会提示稍后重试或重启 DSH
 - 菜单注入是 DOM shim：核心 UI 若调整菜单结构或行 fiber 形状，可能不再注入菜单项（不影响其他功能）
 - 删除不可恢复：没有回收站，也没有撤销
+- 批量删除目前**逐条顺序执行**：空闲会话很快，被 DSH 打开过的会话每条需要等待写所有权释放（最多数秒），一次选很多时整体耗时会变长（后续版本会并发化）
 
 ### 兼容性
 
@@ -109,6 +112,7 @@ This plugin puts Delete back where you already click: the session row's `...` me
 - **Delete from the menu** — a "Delete session" row appears in the sidebar session `...` menu; the session id is read from the menu's React fiber, so the action always targets the row you clicked and **never switches the active conversation**
 - **Risk consent** — the first delete opens a confirmation dialog with the session title and id; the confirm button unlocks only after ticking "I understand"
 - **Confirm once, then skip** — tick "Don't ask again" and later deletes run directly from the menu (a toast reports the result); **hold Shift while clicking** to force the dialog back, or clear `localStorage['dsh-delete-session:skip-confirm']` to restore it permanently
+- **Multi-select batch delete** — "Select multiple" in the session menu enters selection mode: every row gets a round checkbox, clicking a row toggles it (it never opens the conversation), and a bottom bar shows "N selected / Cancel / Delete". Delete runs **immediately** (no confirm dialog, no select-all, every row selectable) and reports a toast summary; Esc or Cancel exits
 - **Real deletion** — stops a running agent (cancel + quiescence), flushes and detaches the live session, removes the on-disk session directories (both the raw and `session-` prefixed id), verifies through the persistence service, then cleans workspace accounting so no orphan shows up under "Ungrouped"
 - **Safe by default** — the host route is loopback-only (loopback socket, loopback Host header, same-origin check); a session still held open by DSH is refused with 409 instead of racing the active writer
 - **Bilingual** — the menu item and dialog follow the DSH interface language (zh / en)
@@ -136,6 +140,7 @@ Restart `dsh web` to apply.
 2. Pick "Delete session" at the bottom
 3. First time: tick "I understand - delete permanently" (tick "Don't ask again" too if you like) and confirm
 4. Afterwards: the session is deleted directly, with a toast
+5. Batch delete: session menu -> "Select multiple" -> tick rows -> "Delete" in the bottom bar; Esc or Cancel exits
 
 <div align="center">
   <a href="https://raw.githubusercontent.com/DDDMUC/dsh-delete-session/main/assets/dialog.jpg">
@@ -156,6 +161,7 @@ Restart `dsh web` to apply.
 - A session DSH currently holds open: the delete waits for the write lease to be released (usually a few seconds) and then completes; in the rare case it stays busy, the dialog asks you to retry later or restart DSH
 - The menu injection is a DOM shim: core UI changes to the menu markup or row fiber shape may stop the item from being injected (nothing else breaks)
 - Deletion is permanent: there is no trash bin and no undo
+- Batch delete currently runs **sequentially**: idle sessions are fast, while a session DSH has opened waits for its write lease (up to a few seconds), so a large selection takes longer (a future version will parallelize it)
 
 ### Compatibility
 

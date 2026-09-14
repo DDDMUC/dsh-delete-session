@@ -33,6 +33,13 @@ window.__ModuleLoader__.load({
       busy: '该会话正被 DSH 打开，删除未能完成；请稍后重试（通常几秒后即可），或重启 DSH 后再试。',
       notFound: '未找到该会话（可能已被删除）。',
       untitled: '未命名会话',
+      multiSelect: '多选',
+      cancelSelect: '取消',
+      selectedCount: (n) => `已选 ${n} 个`,
+      deleteSelected: '删除',
+      batchDone: (n) => `已删除 ${n} 个会话`,
+      batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
+      batchFailed: '批量删除失败：',
     }
 
     const en = {
@@ -49,6 +56,13 @@ window.__ModuleLoader__.load({
       busy: 'This session is currently open in DSH; the delete did not complete. Try again in a moment (usually a few seconds), or restart DSH and retry.',
       notFound: 'Session not found (it may already be deleted).',
       untitled: 'Untitled session',
+      multiSelect: 'Select multiple',
+      cancelSelect: 'Cancel',
+      selectedCount: (n) => `${n} selected`,
+      deleteSelected: 'Delete',
+      batchDone: (n) => `Deleted ${n} session(s)`,
+      batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
+      batchFailed: 'Batch delete failed: ',
     }
 
     let localeSvc = null
@@ -158,6 +172,14 @@ window.__ModuleLoader__.load({
       '.dsdel-btn:disabled{opacity:.5;cursor:default}',
       '.dsdel-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
       '.dsdel-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 25%,transparent);padding:9px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:min(92vw,460px);cursor:pointer}',
+      '.dsdel-check{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.5));background:transparent;flex:none;margin-right:8px;box-sizing:border-box;cursor:pointer}',
+      '.dsdel-check-on{background:var(--dsw-alias-state-business-primary,#4c6ef5);border-color:var(--dsw-alias-state-business-primary,#4c6ef5)}',
+      '.dsdel-check-on::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translateY(-1px)}',
+      '.dsdel-bar{position:fixed;left:12px;bottom:12px;z-index:2147483600;display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));box-shadow:0 12px 32px rgba(0,0,0,.28);color:var(--dsw-alias-label-primary,inherit);font-size:13px;background:linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),var(--dsw-alias-bg-base,#fff)}',
+      '.dsdel-bar-count{white-space:nowrap}',
+      '.dsdel-bar-btn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
+      '.dsdel-bar-btn:disabled{opacity:.5;cursor:default}',
+      '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
     ].join('')
 
     function ensureStyle() {
@@ -305,45 +327,222 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // --- multi-select ----------------------------------------------------------
+    // Entered from the session menu ("多选"). While active, every session row
+    // gets a round checkbox, clicking a row toggles it instead of opening the
+    // conversation, and a bottom bar runs the batch delete. No select-all and
+    // no per-row disabling: every row is selectable and the batch deletes
+    // immediately (the single-session flow keeps its own consent dialog).
+
+    let selecting = false
+    const selected = new Set()
+    let bar = null
+    let decorateRaf = null
+    let rowObserver = null
+
+    function sessionIdFromRow(row) {
+      let fiber = findFiber(row)
+      let guard = 0
+      while (fiber && guard++ < 300) {
+        const props = fiber.memoizedProps
+        if (props && props.node && typeof props.node.id === 'string' && props.node.id) return props.node.id
+        fiber = fiber.return
+      }
+      return null
+    }
+
+    function decorateRows() {
+      const rows = document.querySelectorAll('[role="treeitem"]')
+      rows.forEach((row) => {
+        const id = sessionIdFromRow(row)
+        if (!id) return
+        let check = row.querySelector(':scope > .dsdel-check')
+        if (!check) {
+          check = document.createElement('span')
+          check.className = 'dsdel-check'
+          check.setAttribute('data-dsh-delete-session', 'check')
+          row.insertBefore(check, row.firstChild)
+        }
+        check.classList.toggle('dsdel-check-on', selected.has(id))
+      })
+    }
+
+    function scheduleDecorate() {
+      if (decorateRaf !== null) return
+      decorateRaf = requestAnimationFrame(() => {
+        decorateRaf = null
+        try { decorateRows() } catch { /* best-effort DOM shim */ }
+      })
+    }
+
+    function updateBar() {
+      if (!bar) return
+      const count = bar.querySelector('.dsdel-bar-count')
+      if (count) count.textContent = t('selectedCount')(selected.size)
+      const del = bar.querySelector('.dsdel-bar-danger')
+      if (del) del.disabled = selected.size === 0
+    }
+
+    function toggleSelect(id) {
+      if (selected.has(id)) selected.delete(id)
+      else selected.add(id)
+      scheduleDecorate()
+      updateBar()
+    }
+
+    function onSelectClickCapture(e) {
+      if (!selecting) return
+      const row = e.target && e.target.closest ? e.target.closest('[role="treeitem"]') : null
+      if (!row) return
+      const id = sessionIdFromRow(row)
+      if (!id) return
+      e.preventDefault()
+      e.stopPropagation()
+      toggleSelect(id)
+    }
+
+    function onSelectKeydown(e) {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      exitSelection()
+    }
+
+    function buildBar() {
+      const el = document.createElement('div')
+      el.className = 'dsdel-bar'
+      el.setAttribute('role', 'toolbar')
+      const count = document.createElement('span')
+      count.className = 'dsdel-bar-count'
+      const cancel = document.createElement('button')
+      cancel.type = 'button'
+      cancel.className = 'dsdel-bar-btn'
+      cancel.textContent = t('cancelSelect')
+      cancel.addEventListener('click', (e) => { e.stopPropagation(); exitSelection() })
+      const del = document.createElement('button')
+      del.type = 'button'
+      del.className = 'dsdel-bar-btn dsdel-bar-danger'
+      del.textContent = t('deleteSelected')
+      del.addEventListener('click', (e) => { e.stopPropagation(); runBatchDelete() })
+      el.appendChild(count)
+      el.appendChild(cancel)
+      el.appendChild(del)
+      document.body.appendChild(el)
+      return el
+    }
+
+    function enterSelection() {
+      if (selecting) return
+      selecting = true
+      selected.clear()
+      ensureStyle()
+      if (!bar) bar = buildBar()
+      bar.style.display = 'flex'
+      document.addEventListener('click', onSelectClickCapture, true)
+      document.addEventListener('keydown', onSelectKeydown, true)
+      if (typeof MutationObserver === 'function') {
+        rowObserver = new MutationObserver(scheduleDecorate)
+        rowObserver.observe(document.body, { childList: true, subtree: true })
+      }
+      scheduleDecorate()
+      updateBar()
+    }
+
+    function exitSelection() {
+      if (!selecting) return
+      selecting = false
+      selected.clear()
+      if (bar) bar.style.display = 'none'
+      document.removeEventListener('click', onSelectClickCapture, true)
+      document.removeEventListener('keydown', onSelectKeydown, true)
+      if (rowObserver) { rowObserver.disconnect(); rowObserver = null }
+      document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
+    }
+
+    function postDeleteMany(sessionIds) {
+      return fetch('/dsh-delete-session/delete-many', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionIds }),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`)
+        return data
+      })
+    }
+
+    function runBatchDelete() {
+      const ids = [...selected]
+      if (ids.length === 0) return
+      const del = bar ? bar.querySelector('.dsdel-bar-danger') : null
+      if (del) del.disabled = true
+      postDeleteMany(ids)
+        .then((data) => {
+          const failed = data.failed || 0
+          const deleted = data.deleted || 0
+          toast(failed > 0 ? t('batchPartial')(deleted, failed) : t('batchDone')(deleted), failed > 0)
+          exitSelection()
+          refreshList()
+        })
+        .catch((reason) => {
+          if (del) del.disabled = false
+          toast(t('batchFailed') + String((reason && reason.message) || reason), true)
+        })
+    }
+
     // --- sidebar menu injection ------------------------------------------------
 
     const TRASH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M9 7V4h6v3"/></svg>'
+    const SELECT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="7" r="2"/><circle cx="5" cy="17" r="2"/><path d="M11 7h9"/><path d="M11 17h9"/></svg>'
 
-    function augmentMenu(menuEl, info) {
-      if (menuEl.querySelector('[data-dsh-delete-session]')) return
-      const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
-      if (!viewport) return
+    // Clone a native menu row so an injected action keeps the core styling.
+    function buildMenuItem(menuEl, label, iconSvg, danger, onClick) {
       const proto = menuEl.querySelector('[role="menuitem"]')
-      if (!proto) return
+      if (!proto) return null
       const protoWrap = proto.parentElement
       const wrap = protoWrap ? protoWrap.cloneNode(false) : document.createElement('div')
       if (protoWrap && protoWrap.className) wrap.className = protoWrap.className
-
       const button = document.createElement('button')
       button.type = 'button'
       button.setAttribute('role', 'menuitem')
-      button.setAttribute('data-dsh-delete-session', '1')
       if (proto.className) button.className = proto.className
-      button.style.color = 'var(--dsw-alias-state-error-primary,#e5484d)'
-
+      if (danger) button.style.color = 'var(--dsw-alias-state-error-primary,#e5484d)'
       const icon = document.createElement('span')
       icon.style.cssText = 'display:inline-flex;flex:none;width:16px;height:16px;align-items:center;justify-content:center'
-      icon.innerHTML = TRASH_ICON
-      const label = document.createElement('span')
-      label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-      label.textContent = t('menu')
-
+      icon.innerHTML = iconSvg
+      const text = document.createElement('span')
+      text.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      text.textContent = label
       button.appendChild(icon)
-      button.appendChild(label)
+      button.appendChild(text)
       button.addEventListener('click', (e) => {
         e.stopPropagation()
         e.preventDefault()
         closeMenu()
+        onClick(e)
+      })
+      wrap.appendChild(button)
+      return wrap
+    }
+
+    function augmentMenu(menuEl, info) {
+      if (menuEl.querySelector('[data-dsh-delete-session="1"]')) return
+      const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
+      if (!viewport) return
+
+      const selectWrap = buildMenuItem(menuEl, t('multiSelect'), SELECT_ICON, false, () => enterSelection())
+      const deleteWrap = buildMenuItem(menuEl, t('menu'), TRASH_ICON, true, (e) => {
         if (skipConfirm() && !e.shiftKey) deleteNow(info)
         else openDialog(info)
       })
-      wrap.appendChild(button)
-      viewport.appendChild(wrap)
+      if (selectWrap) {
+        selectWrap.firstChild.setAttribute('data-dsh-delete-session', 'select')
+        viewport.appendChild(selectWrap)
+      }
+      if (deleteWrap) {
+        deleteWrap.firstChild.setAttribute('data-dsh-delete-session', '1')
+        viewport.appendChild(deleteWrap)
+      }
 
       // The portalled menu measured its height before this row existed; nudge
       // the core placement so the grown card is re-clamped on screen.

@@ -30,6 +30,7 @@ export const name = 'dsh-delete-session'
 
 const ROUTE_PREFIX = '/dsh-delete-session'
 const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const MAX_BATCH = 100
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -368,6 +369,56 @@ export function apply(ctx) {
           const code = error instanceof HttpError ? error.code : 'internal'
           sendJson(res, status, { ok: false, code, error: String((error && error.message) || error) })
         }
+      },
+    }))
+
+    fiber.effect(() => webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/delete-many`,
+      handler: async (req, res) => {
+        if (!guard(req, res)) return
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, code: 'method', error: 'POST only' })
+          return
+        }
+        let body = {}
+        try {
+          const raw = await readBody(req)
+          if (raw) body = JSON.parse(raw)
+        } catch {
+          sendJson(res, 400, { ok: false, code: 'invalid', error: 'malformed JSON body' })
+          return
+        }
+        const sessionIds = Array.isArray(body.sessionIds)
+          ? [...new Set(body.sessionIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()))]
+          : []
+        if (sessionIds.length === 0) {
+          sendJson(res, 400, { ok: false, code: 'invalid', error: 'sessionIds required' })
+          return
+        }
+        if (sessionIds.length > MAX_BATCH) {
+          sendJson(res, 400, { ok: false, code: 'invalid', error: `too many sessions (max ${MAX_BATCH})` })
+          return
+        }
+        // Sequential on purpose: every item runs the same guarded pipeline
+        // (lease retry, directory sweep, workspace accounting), so a batch can
+        // never interleave two deletions of the same storage.
+        const results = []
+        for (const sessionId of sessionIds) {
+          try {
+            const result = await deleteSession(ctx, sessionId)
+            results.push({ sessionId, ok: true, removed: result.removed })
+          } catch (error) {
+            results.push({
+              sessionId,
+              ok: false,
+              code: error instanceof HttpError ? error.code : 'internal',
+              error: String((error && error.message) || error),
+            })
+          }
+        }
+        const deleted = results.filter((item) => item.ok).length
+        sendJson(res, 200, { ok: true, results, deleted, failed: results.length - deleted })
       },
     }))
   }
