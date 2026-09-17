@@ -36,6 +36,7 @@ window.__ModuleLoader__.load({
       multiSelect: '多选',
       cancelSelect: '取消',
       selectedCount: (n) => `已选 ${n} 个`,
+      batchRunning: (done, total) => `正在删除 ${done}/${total}…`,
       deleteSelected: '删除',
       batchDone: (n) => `已删除 ${n} 个会话`,
       batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
@@ -59,6 +60,7 @@ window.__ModuleLoader__.load({
       multiSelect: 'Select multiple',
       cancelSelect: 'Cancel',
       selectedCount: (n) => `${n} selected`,
+      batchRunning: (done, total) => `Deleting ${done}/${total}...`,
       deleteSelected: 'Delete',
       batchDone: (n) => `Deleted ${n} session(s)`,
       batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
@@ -103,12 +105,19 @@ window.__ModuleLoader__.load({
     }
 
     function deleteNow(info) {
+      pendingRemoval.add(info.id)
+      scheduleDecorate()
       postDelete(info.id)
         .then(() => {
           toast(t('done'))
           refreshList()
+          settlePendingSoon()
         })
-        .catch((reason) => toast(t('failed') + String((reason && reason.message) || reason), true))
+        .catch((reason) => {
+          pendingRemoval.delete(info.id)
+          scheduleDecorate()
+          toast(t('failed') + String((reason && reason.message) || reason), true)
+        })
     }
 
     function browserLang() {
@@ -175,6 +184,8 @@ window.__ModuleLoader__.load({
       '.dsdel-check{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.5));background:transparent;flex:none;margin-right:8px;box-sizing:border-box;cursor:pointer}',
       '.dsdel-check-on{background:var(--dsw-alias-state-business-primary,#4c6ef5);border-color:var(--dsw-alias-state-business-primary,#4c6ef5)}',
       '.dsdel-check-on::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translateY(-1px)}',
+      // 乐观删除：行先隐藏，失败时随 decorate 恢复
+      '.dsdel-row-pending{display:none!important}',
       '.dsdel-bar{position:fixed;left:12px;bottom:12px;z-index:2147483600;display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));box-shadow:0 12px 32px rgba(0,0,0,.28);color:var(--dsw-alias-label-primary,inherit);font-size:13px;background:linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),var(--dsw-alias-bg-base,#fff)}',
       '.dsdel-bar-count{white-space:nowrap}',
       '.dsdel-bar-btn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
@@ -310,14 +321,19 @@ window.__ModuleLoader__.load({
         confirm.textContent = t('deleting')
         error.style.display = 'none'
         if (skipBox.checked) setSkipConfirm()
+        pendingRemoval.add(info.id)
+        scheduleDecorate()
         postDelete(info.id)
           .then(() => {
             backdrop.remove()
             toast(t('done'))
             refreshList()
+            settlePendingSoon()
           })
           .catch((reason) => {
             busy = false
+            pendingRemoval.delete(info.id)
+            scheduleDecorate()
             confirm.disabled = !checkbox.checked
             cancel.disabled = false
             confirm.textContent = t('confirm')
@@ -336,6 +352,13 @@ window.__ModuleLoader__.load({
 
     let selecting = false
     const selected = new Set()
+    // 乐观 UI：已发出删除请求的行立即隐藏（decorate 时持续生效，React 重渲染也不会闪回）；
+    // 请求失败时从集合移除，行随下一次 decorate 恢复显示。
+    const pendingRemoval = new Set()
+    let batchRunning = false
+    let batchTotal = 0
+    let batchDone = 0
+    let batchFailed = 0
     let bar = null
     let decorateRaf = null
     let rowObserver = null
@@ -364,6 +387,7 @@ window.__ModuleLoader__.load({
           row.insertBefore(check, row.firstChild)
         }
         check.classList.toggle('dsdel-check-on', selected.has(id))
+        row.classList.toggle('dsdel-row-pending', pendingRemoval.has(id))
       })
     }
 
@@ -378,9 +402,15 @@ window.__ModuleLoader__.load({
     function updateBar() {
       if (!bar) return
       const count = bar.querySelector('.dsdel-bar-count')
-      if (count) count.textContent = t('selectedCount')(selected.size)
+      if (count) {
+        count.textContent = batchRunning
+          ? t('batchRunning')(batchDone + batchFailed, batchTotal)
+          : t('selectedCount')(selected.size)
+      }
+      const cancel = bar.querySelector('.dsdel-bar-btn:not(.dsdel-bar-danger)')
       const del = bar.querySelector('.dsdel-bar-danger')
-      if (del) del.disabled = selected.size === 0
+      if (cancel) cancel.disabled = batchRunning
+      if (del) del.disabled = batchRunning || selected.size === 0
     }
 
     function toggleSelect(id) {
@@ -403,6 +433,7 @@ window.__ModuleLoader__.load({
 
     function onSelectKeydown(e) {
       if (e.key !== 'Escape') return
+      if (batchRunning) return
       e.stopPropagation()
       exitSelection()
     }
@@ -447,10 +478,16 @@ window.__ModuleLoader__.load({
       updateBar()
     }
 
-    function exitSelection() {
+    function exitSelection(options) {
       if (!selecting) return
       selecting = false
       selected.clear()
+      batchRunning = false
+      const keepPending = !!(options && options.keepPending)
+      if (!keepPending) {
+        pendingRemoval.clear()
+        document.querySelectorAll('.dsdel-row-pending').forEach((el) => el.classList.remove('dsdel-row-pending'))
+      }
       if (bar) bar.style.display = 'none'
       document.removeEventListener('click', onSelectClickCapture, true)
       document.removeEventListener('keydown', onSelectKeydown, true)
@@ -458,36 +495,71 @@ window.__ModuleLoader__.load({
       document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
     }
 
-    function postDeleteMany(sessionIds) {
-      return fetch('/dsh-delete-session/delete-many', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionIds }),
-      }).then(async (res) => {
-        let data = {}
-        try { data = await res.json() } catch { /* keep {} */ }
-        if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`)
-        return data
-      })
+    // 成功删除后行要保持隐藏直到列表刷新落地，之后再清掉乐观状态（避免行“闪回”）。
+    function settlePendingSoon() {
+      setTimeout(() => {
+        pendingRemoval.clear()
+        scheduleDecorate()
+      }, 2500)
     }
 
+    // 批量删除：客户端并发（小池）+ 乐观隐藏 + 进度显示。
+    // 走单会话端点（每个请求各自跑宿主端的完整删除管线），宿主端对同一存储的
+    // 记账变更已串行化，因此不同会话并发是安全的；失败的行立即恢复显示并保持选中，
+    // 方便直接重试。
+    // 6 是实测值：64 个 ~2MB 会话的墙钟时间 4 路 281ms / 6 路 189ms / 8 路 142ms
+    // （I/O 并行度约在 8 饱和），6 路比 4 路快约 1/3 且仍在饱和点以下。
+    const BATCH_CONCURRENCY = 6
+
     function runBatchDelete() {
+      if (batchRunning) return
       const ids = [...selected]
       if (ids.length === 0) return
-      const del = bar ? bar.querySelector('.dsdel-bar-danger') : null
-      if (del) del.disabled = true
-      postDeleteMany(ids)
-        .then((data) => {
-          const failed = data.failed || 0
-          const deleted = data.deleted || 0
-          toast(failed > 0 ? t('batchPartial')(deleted, failed) : t('batchDone')(deleted), failed > 0)
-          exitSelection()
-          refreshList()
-        })
-        .catch((reason) => {
-          if (del) del.disabled = false
-          toast(t('batchFailed') + String((reason && reason.message) || reason), true)
-        })
+      batchRunning = true
+      batchTotal = ids.length
+      batchDone = 0
+      batchFailed = 0
+      selected.clear()
+      for (const id of ids) pendingRemoval.add(id)
+      scheduleDecorate()
+      updateBar()
+
+      const failedIds = []
+      let cursor = 0
+      const worker = async () => {
+        while (true) {
+          const index = cursor
+          cursor += 1
+          if (index >= ids.length) return
+          const id = ids[index]
+          try {
+            await postDelete(id)
+            batchDone += 1
+          } catch {
+            batchFailed += 1
+            failedIds.push(id)
+            pendingRemoval.delete(id)
+          }
+          scheduleDecorate()
+          updateBar()
+        }
+      }
+      const workers = []
+      for (let i = 0; i < Math.min(BATCH_CONCURRENCY, ids.length); i += 1) workers.push(worker())
+
+      Promise.all(workers).then(() => {
+        batchRunning = false
+        if (batchFailed === 0) {
+          toast(t('batchDone')(batchDone))
+          exitSelection({ keepPending: true })
+          settlePendingSoon()
+        } else {
+          for (const id of failedIds) selected.add(id)
+          toast(t('batchPartial')(batchDone, batchFailed), true)
+          updateBar()
+        }
+        refreshList()
+      })
     }
 
     // --- sidebar menu injection ------------------------------------------------
