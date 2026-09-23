@@ -28,7 +28,8 @@ DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只
 - **风险确认** —— 首次删除弹出确认对话框：显示会话标题与 ID，勾选「我已了解，永久删除」后确认按钮才可用
 - **确认一次后可跳过** —— 对话框里勾选「不再询问，以后直接删除」，之后点菜单项直接删除（左下角 toast 提示）；**按住 Shift 点击**可临时恢复弹窗；清除 `localStorage['dsh-delete-session:skip-confirm']` 可永久恢复
 - **多选批量删除** —— 会话菜单里的「多选」进入选择模式：每行左侧出现勾选圈，点整行即勾选（不会打开会话），底部操作条显示「已选 N 个 / 取消 / 删除」；点删除**立即批量执行**（无确认弹窗、无全选、所有行都可选）：被选中的行**乐观隐藏**、操作条实时显示「正在删除 x/N…」、客户端以 6 路并发请求宿主（不同会话并行、工作区记账串行），完成后 toast 汇总并刷新列表；失败的行立即恢复显示并保持选中，方便直接重试；Esc 或「取消」退出
-- **真正的删除** —— 停止运行中的 agent（cancel + 等待空闲）→ flush / detach 活跃会话 → 删除磁盘会话目录（原始 ID 与 `session-` 前缀两种写法）→ 持久化服务复核 → 清理工作区记账，侧栏不会残留「未分组」孤儿
+- **真正的删除** —— 停止运行中的 agent（cancel + 等待空闲）→ flush / detach 活跃会话 → 删除磁盘会话目录（原始 ID 与 `session-` 前缀两种写法）→ 持久化服务复核 → 清理工作区记账，侧栏不会残留「未分组」孤儿，并连带清理项目缓存行（`$DSH_HOME/storages/*/sessions/<id>.json`），不留无法再显示的幽灵记录
+- **删除后回到新会话** —— 若删除的正是当前打开的会话，自动切到一个全新会话（不再落到已不可用的邻居页——那种页面 composer 会被禁用、侧栏也列不出来，看起来像「没删掉」）
 - **默认安全** —— 宿主路由仅限本机回环（回环 socket + 回环 Host 头 + 同源校验）；被 DSH 打开占用的会话会被明确拒绝（409），绝不与活跃写者竞争
 - **中英双语** —— 菜单项与对话框跟随 DSH 界面语言（zh / en）
 - **零依赖** —— 不引入任何 DSH SDK，所有服务（`sessions` / `sessionPersistence` / `agents` / `workspaceRegistry` / `webServer`）都在调用时通过 cordis 上下文获取
@@ -80,7 +81,7 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 
 ### 兼容性
 
-- DSH `0.1.5-rc.1` 实测通过
+- DSH `0.1.5-rc.1` / `0.1.7-alpha.2` 实测通过（0.1.7 起不再导出 `SettingsProvider`；本插件不依赖 DSH SDK，无需改动）
 - 宿主链路对缺少服务的旧版本会退化为纯文件系统清理
 
 如果这个插件帮到了你，欢迎给仓库点个 ⭐（[GitHub](https://github.com/DDDMUC/dsh-delete-session)）——星标是开发者继续维护的最大动力，感谢支持！
@@ -113,7 +114,8 @@ This plugin puts Delete back where you already click: the session row's `...` me
 - **Risk consent** — the first delete opens a confirmation dialog with the session title and id; the confirm button unlocks only after ticking "I understand"
 - **Confirm once, then skip** — tick "Don't ask again" and later deletes run directly from the menu (a toast reports the result); **hold Shift while clicking** to force the dialog back, or clear `localStorage['dsh-delete-session:skip-confirm']` to restore it permanently
 - **Multi-select batch delete** — "Select multiple" in the session menu enters selection mode: every row gets a round checkbox, clicking a row toggles it (it never opens the conversation), and a bottom bar shows "N selected / Cancel / Delete". Delete runs **immediately** (no confirm dialog, no select-all, every row selectable): selected rows are hidden optimistically, the bar shows live progress ("Deleting x/N..."), and the client runs 6 concurrent requests (independent sessions in parallel, workspace accounting serialized), then reports a toast summary; failed rows reappear immediately and stay selected for a quick retry; Esc or Cancel exits
-- **Real deletion** — stops a running agent (cancel + quiescence), flushes and detaches the live session, removes the on-disk session directories (both the raw and `session-` prefixed id), verifies through the persistence service, then cleans workspace accounting so no orphan shows up under "Ungrouped"
+- **Real deletion** — stops a running agent (cancel + quiescence), flushes and detaches the live session, removes the on-disk session directories (both the raw and `session-` prefixed id), verifies through the persistence service, then cleans workspace accounting so no orphan shows up under "Ungrouped", and removes the session's projection-cache rows (`$DSH_HOME/storages/*/sessions/<id>.json`) so no ghost the sidebar can no longer show is left behind
+- **Leaves a fresh session behind** — when the deleted session is the one the main view is showing, the app switches to a brand-new session instead of a stale neighbour (an unavailable row with a disabled composer that the sidebar cannot even list, which reads as "the delete did not work")
 - **Safe by default** — the host route is loopback-only (loopback socket, loopback Host header, same-origin check); a session still held open by DSH is refused with 409 instead of racing the active writer
 - **Bilingual** — the menu item and dialog follow the DSH interface language (zh / en)
 - **Zero dependencies** — no DSH SDK imports; every service (`sessions`, `sessionPersistence`, `agents`, `workspaceRegistry`, `webServer`) is resolved through the cordis context at call time
@@ -165,7 +167,7 @@ Restart `dsh web` to apply.
 
 ### Compatibility
 
-- Tested on DSH `0.1.5-rc.1`
+- Tested on DSH `0.1.5-rc.1` and `0.1.7-alpha.2`
 - On older versions without the services, the host pipeline degrades to filesystem cleanup
 
 If this plugin has been helpful, a ⭐ on [GitHub](https://github.com/DDDMUC/dsh-delete-session) would mean a lot — it is the biggest motivation for the developer to keep maintaining it. Thank you!

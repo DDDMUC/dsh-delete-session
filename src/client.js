@@ -104,6 +104,44 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // --- current-session handoff ------------------------------------------------
+
+    // Deleting the session the main view is showing leaves the app to restore a
+    // stale neighbour (on 0.1.7 it lands on an unavailable Agent Team row with a
+    // disabled composer), which reads as "the delete did not work". When the
+    // deleted session is the one the app has open, open a fresh session instead.
+    function deletedVariants(id) {
+      return id.startsWith('session-') ? [id, id.slice('session-'.length)] : [id, `session-${id}`]
+    }
+
+    function leaveIfCurrent(id) {
+      let current = null
+      try {
+        const raw = localStorage.getItem('dsh.sessions.current')
+        current = raw ? (JSON.parse(raw) || {}).sessionId || null : null
+      } catch {
+        return
+      }
+      if (!current || !deletedVariants(id).includes(current)) return
+      const btn = document.querySelector(
+        'button[class*="newSession"], button[aria-label*="New session" i], button[aria-label*="新会话"]',
+      )
+      if (btn) {
+        try {
+          btn.click()
+          return
+        } catch {
+          // fall through to the state reset
+        }
+      }
+      try {
+        localStorage.removeItem('dsh.sessions.current')
+        window.location.reload()
+      } catch {
+        // ignore
+      }
+    }
+
     function deleteNow(info) {
       pendingRemoval.add(info.id)
       scheduleDecorate()
@@ -112,6 +150,7 @@ window.__ModuleLoader__.load({
           toast(t('done'))
           refreshList()
           settlePendingSoon()
+          leaveIfCurrent(info.id)
         })
         .catch((reason) => {
           pendingRemoval.delete(info.id)
@@ -329,6 +368,7 @@ window.__ModuleLoader__.load({
             toast(t('done'))
             refreshList()
             settlePendingSoon()
+            leaveIfCurrent(info.id)
           })
           .catch((reason) => {
             busy = false
@@ -559,6 +599,9 @@ window.__ModuleLoader__.load({
           updateBar()
         }
         refreshList()
+        for (const id of ids) {
+          if (!failedIds.includes(id)) leaveIfCurrent(id)
+        }
       })
     }
 

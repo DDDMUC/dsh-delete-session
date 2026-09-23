@@ -92,6 +92,44 @@ function removeSessionDirs(sessionId) {
   return dirs
 }
 
+// Deleting the on-disk directory is not enough: projection caches keep a
+// per-session JSON row (`$DSH_HOME/storages/<store>/sessions/<id>.json`) that
+// would linger as a ghost — the sidebar list is directory-backed, so the row
+// can never be shown or deleted again (issue: "can't delete anymore"). Remove
+// the session's cache units together with its directories.
+function removeSessionCaches(sessionId) {
+  const storesRoot = path.join(dshHome(), 'storages')
+  const removed = []
+  let stores
+  try {
+    stores = fs.readdirSync(storesRoot, { withFileTypes: true })
+  } catch {
+    return removed
+  }
+  const names = idVariants(sessionId).map((variant) => `${variant}.json`)
+  for (const store of stores) {
+    if (!store.isDirectory()) continue
+    const dir = path.join(storesRoot, store.name, 'sessions')
+    let entries
+    try {
+      entries = fs.readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!names.includes(entry)) continue
+      const file = path.join(dir, entry)
+      try {
+        fs.rmSync(file, { force: true })
+        removed.push(file)
+      } catch {
+        // best-effort: a locked cache row must not fail the deletion
+      }
+    }
+  }
+  return removed
+}
+
 // --- live state --------------------------------------------------------------
 
 // Stop a running agent before its session disappears: cancel the active turn
@@ -303,11 +341,16 @@ async function deleteSession(ctx, sessionId) {
     throw new HttpError(500, 'verify-failed', 'session directories could not be fully removed')
   }
 
+  // Cache rows are projection state, not the source of truth: clean them even
+  // when the directories were already gone, so a deleted session cannot leave
+  // a ghost behind.
+  const cachesRemoved = removeSessionCaches(sessionId)
+
   const workspaceDetached = await withWorkspaceLock(() => detachFromWorkspace(ctx, sessionId))
-  if (removed.length === 0 && !workspaceDetached && !flushed && !detached) {
+  if (removed.length === 0 && !workspaceDetached && !flushed && !detached && cachesRemoved.length === 0) {
     throw new HttpError(404, 'not-found', 'session not found')
   }
-  return { removed: removed.length, stopped, flushed, detached, workspaceDetached }
+  return { removed: removed.length, caches: cachesRemoved.length, stopped, flushed, detached, workspaceDetached }
 }
 
 // --- http --------------------------------------------------------------------
