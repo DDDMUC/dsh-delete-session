@@ -419,16 +419,26 @@ window.__ModuleLoader__.load({
       rows.forEach((row) => {
         const id = sessionIdFromRow(row)
         if (!id) return
-        let check = row.querySelector(':scope > .dsdel-check')
-        if (!check) {
-          check = document.createElement('span')
-          check.className = 'dsdel-check'
-          check.setAttribute('data-dsh-delete-session', 'check')
-          row.insertBefore(check, row.firstChild)
+        // Checkboxes belong to multi-select only: a single delete (or any other
+        // decorate pass outside the mode) must not plant them on every row.
+        if (!selecting) {
+          const stray = row.querySelector(':scope > .dsdel-check')
+          if (stray) stray.remove()
+        } else {
+          let check = row.querySelector(':scope > .dsdel-check')
+          if (!check) {
+            check = document.createElement('span')
+            check.className = 'dsdel-check'
+            check.setAttribute('data-dsh-delete-session', 'check')
+            row.insertBefore(check, row.firstChild)
+          }
+          check.classList.toggle('dsdel-check-on', selected.has(id))
         }
-        check.classList.toggle('dsdel-check-on', selected.has(id))
         row.classList.toggle('dsdel-row-pending', pendingRemoval.has(id))
       })
+      if (!selecting) {
+        document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
+      }
     }
 
     function scheduleDecorate() {
