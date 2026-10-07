@@ -72,6 +72,14 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 - `src/client.js`（浏览器）：经典客户端 bundle——监听 portal 到 body 的会话菜单（`body > [role="menu"]`），沿 React fiber 链读取会话节点（`props.node.id`），克隆原生菜单行保持样式，弹出确认对话框
 - 删除链路：停 agent → flush / detach 活跃会话 → 写所有权探测（被占用 → 409）→ 删除目录（两种 ID 写法 + 复核）→ 清理工作区记账
 
+### 测试
+
+- `test/checkbox.dom.test.js` —— 勾选框回归测试（`node --test`，零依赖）：把真实的 `src/client.js` 跑在一个可读的 DOM 实现上，只经由用户真正会碰的入口（注入的会话菜单项、插件自己生成的 DOM）驱动，断言 **「存在 `.dsdel-check` ⟺ 多选模式开启」**
+- 覆盖的回归：单条删除（`deleteNow` / 对话框确认）会调用 `scheduleDecorate()`，而 v0.1.8 之前 `decorateRows()` **无条件**给每一行插入勾选框，于是删掉一个会话后所有行都长出了圆勾选框、底部操作条却仍然隐藏——一个「半开」的多选状态
+- 这个测试是有意义的，不是空跑：把 `decorateRows()` 改回旧写法时其中 5 项会失败；改成「永不插入勾选框」时另有 4 项会失败
+- 运行：`npm test`
+- **尚未验证的一环（诚实说明）**：与真实 DSH 界面的耦合——真实 DOM 结构、真实 CSS 布局、以及 React 调和器在重渲染会话行时是否会丢弃注入的勾选框——只能由真实浏览器验证。上述测试覆盖的是插件的点击与装饰状态机本身
+
 ### 已知限制
 
 - 被 DSH 当前打开占用的会话：删除会自动等待写所有权释放（通常几秒）后完成；极少数仍被占用的情况会提示稍后重试或重启 DSH
@@ -157,6 +165,14 @@ Restart `dsh web` to apply.
 - `src/index.js` (host): one loopback-only route `POST /dsh-delete-session/delete` `{ sessionId }` runs the deletion pipeline
 - `src/client.js` (browser): a classic client bundle — watches for the portalled session menu (`body > [role="menu"]`), walks the React fiber chain to the session node (`props.node.id`), clones a native menu row for styling, and opens the confirmation dialog
 - Pipeline: stop agent → flush / detach live session → write-lease probe (busy → 409) → remove directories (both id spellings + verification) → clean workspace accounting
+
+### Tests
+
+- `test/checkbox.dom.test.js` — the multi-select checkbox regression test (`node --test`, zero dependencies): it runs the real `src/client.js` against a readable DOM implementation and drives it only through surfaces a user touches (the injected session-menu items and the DOM the plugin builds), asserting that **a `.dsdel-check` exists if and only if multi-select is on**
+- The regression it covers: a plain single delete (`deleteNow` / the dialog's confirm handler) calls `scheduleDecorate()`, and before v0.1.8 `decorateRows()` planted a checkbox on **every** row unconditionally — so after deleting one session every row grew a round checkbox while the batch bar stayed hidden, a "half-on" multi-select state
+- The test earns its keep: reverting `decorateRows()` to the old shape fails 5 of its cases, and a fix that never plants checkboxes fails 4
+- Run it with `npm test`
+- **Not verified (honest note):** the coupling to the real DSH UI — real DOM structure, real CSS layout, and whether React's reconciler drops injected checkboxes when it re-renders a session row — can only be checked in a real browser. What these tests cover is the plugin's own click and decoration state machine
 
 ### Known limitations
 
