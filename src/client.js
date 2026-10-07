@@ -29,7 +29,6 @@ window.__ModuleLoader__.load({
       cancel: '取消',
       confirm: '删除',
       deleting: '删除中…',
-      ack: '我已了解，永久删除',
       dontAsk: '不再询问，以后直接删除',
       done: '已删除会话',
       failed: '删除失败：',
@@ -58,7 +57,6 @@ window.__ModuleLoader__.load({
       cancel: 'Cancel',
       confirm: 'Delete',
       deleting: 'Deleting...',
-      ack: 'I understand - delete permanently',
       dontAsk: "Don't ask again",
       done: 'Session deleted',
       failed: 'Delete failed: ',
@@ -326,15 +324,6 @@ window.__ModuleLoader__.load({
       text.className = 'dsdel-text'
       text.textContent = t('desc')
 
-      const ack = document.createElement('label')
-      ack.className = 'dsdel-ack'
-      const checkbox = document.createElement('input')
-      checkbox.type = 'checkbox'
-      const ackText = document.createElement('span')
-      ackText.textContent = t('ack')
-      ack.appendChild(checkbox)
-      ack.appendChild(ackText)
-
       const skip = document.createElement('label')
       skip.className = 'dsdel-ack'
       const skipBox = document.createElement('input')
@@ -358,14 +347,12 @@ window.__ModuleLoader__.load({
       confirm.type = 'button'
       confirm.className = 'dsdel-btn dsdel-danger'
       confirm.textContent = t('confirm')
-      confirm.disabled = true
       actions.appendChild(cancel)
       actions.appendChild(confirm)
 
       dialog.appendChild(title)
       dialog.appendChild(meta)
       dialog.appendChild(text)
-      dialog.appendChild(ack)
       dialog.appendChild(skip)
       dialog.appendChild(error)
       dialog.appendChild(actions)
@@ -377,13 +364,12 @@ window.__ModuleLoader__.load({
         if (busy) return
         backdrop.remove()
       }
-      checkbox.addEventListener('change', () => { confirm.disabled = !checkbox.checked })
       cancel.addEventListener('click', close)
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close() })
       backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
 
       confirm.addEventListener('click', () => {
-        if (busy || !checkbox.checked) return
+        if (busy) return
         busy = true
         confirm.disabled = true
         cancel.disabled = true
@@ -404,7 +390,7 @@ window.__ModuleLoader__.load({
             busy = false
             pendingRemoval.delete(info.id)
             scheduleDecorate()
-            confirm.disabled = !checkbox.checked
+            confirm.disabled = false
             cancel.disabled = false
             confirm.textContent = t('confirm')
             error.textContent = t('failed') + String((reason && reason.message) || reason)

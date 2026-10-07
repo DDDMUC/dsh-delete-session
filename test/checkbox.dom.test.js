@@ -426,8 +426,7 @@ const dialogParts = (harness) => {
   const buttons = nodes.filter((node) => node._classes.has('dsdel-btn'))
   return {
     box,
-    consent: checkboxes[0] ?? null,
-    skip: checkboxes[1] ?? null,
+    skip: checkboxes[0] ?? null,
     cancel: buttons.find((b) => !b._classes.has('dsdel-danger')) ?? null,
     confirm: buttons.find((b) => b._classes.has('dsdel-danger')) ?? null,
     title: nodes.find((node) => node._classes.has('dsdel-title'))?.textContent ?? null,
@@ -444,7 +443,7 @@ const flush = async () => { await tick() }
  *
  * `decorateRows()` is a private closure and is deliberately not reachable from a
  * test. Outside the mode no observer decorates either, so the only passes are the
- * plugin's own internal calls from the delete paths. This drives the consent
+ * plugin's own internal calls from the delete paths. This drives the delete
  * dialog, whose confirm handler is the exact call site the bug shipped from.
  */
 async function decorateViaSingleDelete(harness, session = SESSION_A) {
@@ -452,9 +451,7 @@ async function decorateViaSingleDelete(harness, session = SESSION_A) {
   assert.ok(deleteItem, 'the Delete item was injected into the session menu')
   deleteItem.fire('click')
   const parts = dialogParts(harness)
-  assert.ok(parts, 'the consent dialog opened')
-  parts.consent.checked = true
-  parts.consent.fire('change')
+  assert.ok(parts, 'the delete dialog opened')
   parts.confirm.fire('click')
   await tick()
 }
@@ -486,12 +483,8 @@ test('deleting one session through the dialog leaves no half-on multi-select', a
 
   deleteItem.fire('click')
   const parts = dialogParts(harness)
-  assert.ok(parts, 'the consent dialog opened')
-  assert.equal(parts.confirm.disabled, true, 'confirm starts locked')
-
-  parts.consent.checked = true
-  parts.consent.fire('change')
-  assert.equal(parts.confirm.disabled, false, 'consent unlocks confirm')
+  assert.ok(parts, 'the delete dialog opened')
+  assert.equal(parts.confirm.disabled, false, 'confirm is ready without an ack')
 
   parts.confirm.fire('click')
   await tick()
@@ -714,8 +707,6 @@ test("the dialog's don't-ask-again flips the page checkbox off", async () => {
   const { deleteItem } = openSessionMenu(harness, SESSION_A)
   deleteItem.fire('click')
   const parts = dialogParts(harness)
-  parts.consent.checked = true
-  parts.consent.fire('change')
   parts.skip.checked = true
   parts.confirm.fire('click')
   await tick()
