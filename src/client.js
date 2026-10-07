@@ -12,12 +12,15 @@
 //
 // The module is a classic client bundle (client-modules protocol): it
 // registers a factory with window.__ModuleLoader__ and returns apply().
-// No React, no SDK imports - theme tokens and DOM only, so it survives core
-// UI revisions that keep the menu contract.
+// The menu injection and dialog are DOM-only (theme tokens, no SDK) so they
+// survive core UI revisions that keep the menu contract; React is pulled in
+// only for the plugin-page settings card (slot `plugins.row.config`).
 window.__ModuleLoader__.load({
   id: 'dsh-delete-session',
-  factory: () => {
+  factory: (require) => {
     const NS = 'dsh-delete-session'
+    const react = require('react')
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
 
     const zh = {
       menu: '删除会话',
@@ -41,6 +44,11 @@ window.__ModuleLoader__.load({
       batchDone: (n) => `已删除 ${n} 个会话`,
       batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
       batchFailed: '批量删除失败：',
+      pageAsk: '删除时询问',
+      pageHintAsk: '每次删除会话前都会弹出确认框。',
+      pageHintAuto: '删除会话会直接执行，不再询问。',
+      pageSummaryAsk: '删除前询问',
+      pageSummaryAuto: '直接删除',
     }
 
     const en = {
@@ -65,22 +73,42 @@ window.__ModuleLoader__.load({
       batchDone: (n) => `Deleted ${n} session(s)`,
       batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
       batchFailed: 'Batch delete failed: ',
+      pageAsk: 'Ask before deleting',
+      pageHintAsk: 'Show a confirmation dialog before every session delete.',
+      pageHintAuto: 'Delete the session right away without asking.',
+      pageSummaryAsk: 'Ask before deleting',
+      pageSummaryAuto: 'Delete without asking',
     }
 
     let localeSvc = null
     let sessionsSvc = null
 
-    // Once the user ticks "don't ask again" the confirmation dialog is
-    // skipped and the menu item deletes directly. Shift+click always opens
-    // the dialog again, and clearing the key in localStorage restores it.
+    // Once the user opts out ("删除时询问" unticked - either in the plugin page
+    // or via the dialog's "don't ask again") the confirmation dialog is skipped
+    // and the menu item deletes directly. Shift+click always opens the dialog
+    // again. The plugin page's checkbox and the dialog read the same key, and a
+    // subscription keeps the card in step when either one flips it.
     const SKIP_KEY = 'dsh-delete-session:skip-confirm'
+    const skipListeners = new Set()
 
     function skipConfirm() {
       try { return localStorage.getItem(SKIP_KEY) === '1' } catch { return false }
     }
 
-    function setSkipConfirm() {
-      try { localStorage.setItem(SKIP_KEY, '1') } catch { /* private mode: ignore */ }
+    function setSkipConfirm(value) {
+      const skip = value === true
+      try {
+        if (skip) localStorage.setItem(SKIP_KEY, '1')
+        else localStorage.removeItem(SKIP_KEY)
+      } catch { /* private mode: ignore */ }
+      for (const listener of skipListeners) {
+        try { listener() } catch { /* a subscriber must not break the toggle */ }
+      }
+    }
+
+    function subscribeSkip(listener) {
+      skipListeners.add(listener)
+      return () => { skipListeners.delete(listener) }
     }
 
     function postDelete(sessionId) {
@@ -230,6 +258,8 @@ window.__ModuleLoader__.load({
       '.dsdel-bar-btn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
       '.dsdel-bar-btn:disabled{opacity:.5;cursor:default}',
       '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
+      '.dsdel-page{display:flex;flex-direction:column;gap:8px}',
+      '.dsdel-page-hint{margin:0;color:var(--dsw-alias-label-tertiary,#888);font-size:13px;line-height:20px}',
     ].join('')
 
     function ensureStyle() {
@@ -359,7 +389,7 @@ window.__ModuleLoader__.load({
         cancel.disabled = true
         confirm.textContent = t('deleting')
         error.style.display = 'none'
-        if (skipBox.checked) setSkipConfirm()
+        if (skipBox.checked) setSkipConfirm(true)
         pendingRemoval.add(info.id)
         scheduleDecorate()
         postDelete(info.id)
@@ -674,6 +704,40 @@ window.__ModuleLoader__.load({
       window.dispatchEvent(new Event('resize'))
     }
 
+    // --- plugin page (slot plugins.row.config) ---------------------------------
+
+    // The manager's detail page for this bundle gives the component row a
+    // configure arrow once the bundle registers its own row.config entry (key
+    // `<bundle package>#<row id>`). The card carries the one setting the dialog
+    // also exposes: whether a session delete asks first.
+    function AskBeforeDeleteOption({ view }) {
+      const [ask, setAsk] = react.useState(!skipConfirm())
+      react.useEffect(() => subscribeSkip(() => setAsk(!skipConfirm())), [])
+      if (view === 'summary') return t(ask ? 'pageSummaryAsk' : 'pageSummaryAuto')
+      return react.createElement(
+        'div',
+        { className: 'dsdel-page' },
+        react.createElement(primitives.Checkbox, {
+          checked: ask,
+          label: t('pageAsk'),
+          onChange: (checked) => {
+            setAsk(checked === true)
+            setSkipConfirm(checked !== true)
+          },
+        }),
+        react.createElement('p', { className: 'dsdel-page-hint' }, t(ask ? 'pageHintAsk' : 'pageHintAuto')),
+      )
+    }
+
+    function installSettings(slots) {
+      slots.inject('plugins.row.config', () =>
+        slots.register(
+          { name: 'plugins.row.config', key: 'dsh-delete-session#dsh-delete-session' },
+          AskBeforeDeleteOption,
+        ),
+      )
+    }
+
     function install() {
       if (typeof document === 'undefined' || !document.body) return null
       ensureStyle()
@@ -703,6 +767,11 @@ window.__ModuleLoader__.load({
       localeSvc = ctx.get('locale') || null
       if (!localeSvc) {
         try { ctx.inject(['locale'], (sub) => { localeSvc = sub.locale }) } catch { /* optional */ }
+      }
+      const slots = ctx.get('slots')
+      if (slots) installSettings(slots)
+      else {
+        try { ctx.inject(['slots'], (sub) => installSettings(sub.slots)) } catch { /* optional */ }
       }
       const dispose = install()
       if (dispose) ctx.effect(() => dispose)

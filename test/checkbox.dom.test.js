@@ -309,15 +309,37 @@ async function loadPlugin() {
     return { ok: true, status: 200, json: async () => ({ ok: true }) }
   }
 
+  // The plugin page (slot plugins.row.config) is the only React surface. Capture
+  // its registration so a test can render the card; the menu/dialog stays DOM-only.
+  const slotRegistrations = []
+  const slotsStub = {
+    inject: (name, fn) => { fn() },
+    register: (spec, Component) => { slotRegistrations.push({ spec, Component }); return () => {} },
+  }
+  const reactStub = {
+    useState: (initial) => [initial, () => {}],
+    useEffect: (effect) => effect(),
+    createElement: (type, props, ...children) => ({
+      type,
+      props: { ...(props || {}), children: children.length === 1 ? children[0] : children },
+    }),
+  }
+  const primitivesStub = { Checkbox: (props) => ({ type: 'Checkbox', props }) }
+  const requireStub = (id) => {
+    if (id === 'react') return reactStub
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitivesStub
+    throw new Error('unexpected client require: ' + id)
+  }
+
   if (bundleFactory === null) await import(new URL('../src/client.js', import.meta.url).href)
-  const plugin = bundleFactory()
+  const plugin = bundleFactory(requireStub)
   plugin.apply({
-    get: () => null,
-    inject: () => {},
+    get: (name) => (name === 'slots' ? slotsStub : null),
+    inject: (names, cb) => { if (typeof cb === 'function') cb({ slots: slotsStub }) },
     effect: (fn) => { const dispose = fn(); return () => { if (typeof dispose === 'function') dispose() } },
   })
 
-  return { document, requests, rows, observers }
+  return { document, requests, rows, observers, slotRegistrations }
 }
 
 function makeStorage() {
@@ -640,4 +662,64 @@ test('residue left by an older build is swept away by the next pass', async () =
 
   assert.equal(totalCheckboxes(harness), 0, 'the sweep clears it')
   assert.equal(row.querySelectorAll(':scope > .dsdel-check').length, 0)
+})
+
+// --- the plugin page: "ask before deleting" (slot plugins.row.config) -------
+
+const SKIP_KEY = 'dsh-delete-session:skip-confirm'
+const rowConfig = (harness) =>
+  harness.slotRegistrations.find((entry) => entry.spec.name === 'plugins.row.config') ?? null
+const pageCheckbox = (harness, view = 'page') => rowConfig(harness).Component({ view }).props.children[0]
+
+test('the plugin page registers a row.config entry under the bundle#row key', async () => {
+  const harness = await loadPlugin()
+  const entry = rowConfig(harness)
+  assert.ok(entry, 'a plugins.row.config entry is registered')
+  assert.equal(entry.spec.key, 'dsh-delete-session#dsh-delete-session')
+})
+
+test('the row.config summary reflects the ask state', async () => {
+  const harness = await loadPlugin()
+  assert.equal(rowConfig(harness).Component({ view: 'summary' }), '删除前询问')
+  localStorage.setItem(SKIP_KEY, '1')
+  assert.equal(rowConfig(harness).Component({ view: 'summary' }), '直接删除')
+  localStorage.removeItem(SKIP_KEY)
+})
+
+test('the page checkbox starts ticked and unticking it deletes without a dialog', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  assert.equal(pageCheckbox(harness).props.checked, true, 'asking is the default')
+
+  pageCheckbox(harness).props.onChange(false)
+  assert.equal(localStorage.getItem(SKIP_KEY), '1', 'unticking stores the opt-out')
+
+  const { deleteItem } = openSessionMenu(harness, SESSION_A)
+  deleteItem.fire('click')
+  await tick()
+
+  assert.equal(dialog(harness), null, 'no dialog opens once asking is off')
+  assert.equal(
+    harness.requests.filter((call) => call.url === '/dsh-delete-session/delete').length,
+    1,
+    'the delete goes out straight away',
+  )
+})
+
+test("the dialog's don't-ask-again flips the page checkbox off", async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  assert.equal(pageCheckbox(harness).props.checked, true)
+
+  const { deleteItem } = openSessionMenu(harness, SESSION_A)
+  deleteItem.fire('click')
+  const parts = dialogParts(harness)
+  parts.consent.checked = true
+  parts.consent.fire('change')
+  parts.skip.checked = true
+  parts.confirm.fire('click')
+  await tick()
+
+  assert.equal(localStorage.getItem(SKIP_KEY), '1', 'the dialog stored the opt-out')
+  assert.equal(pageCheckbox(harness).props.checked, false, 'the page checkbox reflects it')
 })

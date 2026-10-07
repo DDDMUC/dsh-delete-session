@@ -1,6 +1,6 @@
 {
   "name": "dsh-delete-session",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Delete sessions from the DSH Web sidebar: adds a Delete action to the session row menu with a risk-consent dialog, then removes the session log, workspace accounting and live session state.",
   "type": "module",
   "main": "src/index.js",
@@ -39,7 +39,9 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime"
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-primitives"
       ],
       "platform": "web"
     }
