@@ -23,6 +23,12 @@
     "delete"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/DDDMUC/dsh-delete-session.git"
