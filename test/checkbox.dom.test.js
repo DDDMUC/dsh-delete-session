@@ -1,4 +1,5 @@
-// Regression tests for the multi-select checkbox, against a small DOM stub.
+// Regression tests for the multi-select checkbox, plus the integration contract
+// that the slot migration introduced.
 //
 // The shipped defect (fixed in v0.1.8, "only plant multi-select checkboxes
 // inside multi-select"): a plain single delete calls scheduleDecorate(), and
@@ -15,8 +16,8 @@
 // The static checker cannot see this: it is a state machine over DOM mutations.
 // Driving the real bundle is the only way to catch a re-introduction, so this
 // file loads src/client.js and reaches the plugin only through the surfaces a
-// user touches - the injected session-menu items and the DOM it builds. No
-// browser, no React, no DSH server, no tokens.
+// user touches - the slots it registers into, the menu rows and dialog those
+// components render, and the DOM it builds. No browser, no DSH server, no tokens.
 //
 //   node --test "test/*.test.js"
 import assert from 'node:assert/strict'
@@ -116,20 +117,12 @@ class StubElement {
     this.parentElement = null
   }
 
-  /** Detached shallow clone; the plugin clones a native menu row with `false`. */
-  cloneNode() {
-    const copy = new StubElement(this.tagName)
-    copy.className = this.className
-    for (const [name, value] of Object.entries(this.attributes)) copy.attributes[name] = value
-    return copy
+  getAttribute(name) {
+    return name in this.attributes ? this.attributes[name] : null
   }
 
   setAttribute(name, value) {
     this.attributes[name] = String(value)
-  }
-
-  getAttribute(name) {
-    return name in this.attributes ? this.attributes[name] : null
   }
 
   addEventListener(type, handler) {
@@ -209,6 +202,10 @@ function matches(node, selector) {
 
 // --- harness ----------------------------------------------------------------
 
+const NS = 'dsh-delete-session'
+const SKIP_KEY = 'dsh-delete-session:skip-confirm'
+const MENU_SLOT = 'sidebar.workspaces.session.menu.item'
+
 const SESSION_A = { id: 'session-aaaa1111-2222-4333-8444-555555555555', title: 'first session' }
 const SESSION_B = { id: 'session-bbbb1111-2222-4333-8444-555555555555', title: 'second session' }
 
@@ -220,7 +217,7 @@ let bundleFactory = null
  * what gives each test its own instance: calling it builds fresh closures over
  * whatever stubs are installed now.
  */
-async function loadPlugin() {
+async function loadPlugin(options = {}) {
   const requests = []
   const rows = []
   const observers = []
@@ -251,9 +248,6 @@ async function loadPlugin() {
     },
     querySelector: (selector) => document.querySelectorAll(selector)[0] ?? null,
     querySelectorAll(selector) {
-      if (selector === 'body > [role="menu"]') {
-        return document.body.children.filter((node) => node.getAttribute('role') === 'menu')
-      }
       if (selector === '[role="treeitem"]') {
         return walk(document.body).filter((node) => node.getAttribute('role') === 'treeitem')
       }
@@ -309,22 +303,50 @@ async function loadPlugin() {
     return { ok: true, status: 200, json: async () => ({ ok: true }) }
   }
 
-  // The plugin page (slot plugins.row.config) is the only React surface. Capture
-  // its registration so a test can render the card; the menu/dialog stays DOM-only.
+  // Every React surface is now a slot occupant: two session-menu rows, the
+  // confirmation dialog in shell.overlay, and the plugin page card. Capture each
+  // registration so a test can render it the way the host would.
   const slotRegistrations = []
   const slotsStub = {
     inject: (name, fn) => { fn() },
     register: (spec, Component) => { slotRegistrations.push({ spec, Component }); return () => {} },
   }
+
+  // The plugin registers its locale namespace; capturing it gives the tests the
+  // real strings and proves the registration happened.
+  const locales = {}
+  const localeStub = {
+    register: (namespace, dictionaries) => { locales[namespace] = dictionaries },
+    translate: (namespace, key) => {
+      const value = locales[namespace]?.zh?.[key]
+      return typeof value === 'function' ? value() : value ?? key
+    },
+  }
+
+  // `useSyncExternalStore` is modelled as "render once, re-read on the next call",
+  // which is exactly how these tests drive a component: call it again after an
+  // action and assert on the tree it returns.
   const reactStub = {
+    Fragment: Symbol.for('react.fragment'),
     useState: (initial) => [initial, () => {}],
     useEffect: (effect) => effect(),
+    useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
+    // React semantics: positional children win, but with none a `children` given
+    // inside the props object is kept as-is (the plugin passes the Modal's
+    // children that way, so a stub that overwrote it would hide the whole dialog).
     createElement: (type, props, ...children) => ({
       type,
-      props: { ...(props || {}), children: children.length === 1 ? children[0] : children },
+      props: children.length === 0
+        ? { ...(props || {}) }
+        : { ...(props || {}), children: children.length === 1 ? children[0] : children },
     }),
   }
-  const primitivesStub = { Checkbox: (props) => ({ type: 'Checkbox', props }) }
+  const primitivesStub = {
+    Button: (props) => ({ type: 'Button', props }),
+    Checkbox: (props) => ({ type: 'Checkbox', props }),
+    MenuItemButton: (props) => ({ type: 'MenuItemButton', props }),
+    Modal: (props) => ({ type: 'Modal', props }),
+  }
   const requireStub = (id) => {
     if (id === 'react') return reactStub
     if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitivesStub
@@ -334,12 +356,25 @@ async function loadPlugin() {
   if (bundleFactory === null) await import(new URL('../src/client.js', import.meta.url).href)
   const plugin = bundleFactory(requireStub)
   plugin.apply({
-    get: (name) => (name === 'slots' ? slotsStub : null),
-    inject: (names, cb) => { if (typeof cb === 'function') cb({ slots: slotsStub }) },
+    get: (name) => {
+      if (name === 'slots') return slotsStub
+      // `lateLocale` models a host where the locale service is only reachable
+      // through ctx.inject, which is the path that used to skip registration.
+      if (name === 'locale') return options.lateLocale ? null : localeStub
+      return null
+    },
+    inject: (names, cb) => {
+      if (typeof cb === 'function') cb(options.lateLocale ? { slots: slotsStub, locale: localeStub } : { slots: slotsStub })
+    },
     effect: (fn) => { const dispose = fn(); return () => { if (typeof dispose === 'function') dispose() } },
   })
 
-  return { document, requests, rows, observers, slotRegistrations }
+  const t = (key, a, b) => {
+    const value = locales[NS]?.zh?.[key]
+    return typeof value === 'function' ? value(a, b) : value ?? key
+  }
+
+  return { document, requests, rows, observers, slotRegistrations, locales, primitives: primitivesStub, t }
 }
 
 function makeStorage() {
@@ -353,56 +388,82 @@ function makeStorage() {
 }
 
 /**
- * Attach a row with a React fiber chain carrying `node.id`, exactly the contract
- * `sessionIdFromRow` walks. Without this the plugin finds no id and skips the row,
- * which would make every assertion below pass vacuously.
+ * Attach a row carrying the host's own drag-and-drop key. Row identity now comes
+ * from `data-row-key`, not from a React fiber; without this the plugin finds no
+ * id and skips the row, which would make every assertion below pass vacuously.
  */
 function mountRow(harness, session = SESSION_A) {
   const row = harness.document.createElement('div')
   row.className = 'session_row'
   row.setAttribute('role', 'treeitem')
-  row.__reactFiber$test = { memoizedProps: { node: { id: session.id, title: session.title } }, return: null }
+  row.setAttribute('data-row-key', `session:${session.id}`)
   harness.document.body.appendChild(row)
   harness.rows.push(row)
   return row
 }
 
-/**
- * Open a session menu the way the host portals one: `body > [role="menu"]`, whose
- * fiber chain reaches a component holding `node.id`. Returns the injected items.
- */
-function openSessionMenu(harness, session = SESSION_A) {
-  const menu = harness.document.createElement('div')
-  menu.setAttribute('role', 'menu')
-  menu.__reactFiber$test = { memoizedProps: { node: { id: session.id, title: session.title } }, return: null }
-  const viewport = harness.document.createElement('div')
-  viewport.setAttribute('role', 'presentation')
-  const native = harness.document.createElement('button')
-  native.className = 'menu_item'
-  native.setAttribute('role', 'menuitem')
-  viewport.appendChild(native)
-  menu.appendChild(viewport)
-  harness.document.body.appendChild(menu)
+// --- driving the registered slots -------------------------------------------
 
-  // The plugin installed a MutationObserver to scan for portalled menus; firing
-  // it is how the real host would tell the plugin the menu exists.
-  for (const observer of harness.observers) observer.callback()
+const menuEntry = (harness, id) =>
+  harness.slotRegistrations.find((entry) => entry.spec.name === MENU_SLOT && entry.spec.id === id) ?? null
+
+const overlayEntry = (harness) =>
+  harness.slotRegistrations.find((entry) => entry.spec.name === 'shell.overlay') ?? null
+
+/** Render the "Delete session" row the way the host renders a menu entry. */
+function deleteRow(harness, session = SESSION_A) {
+  const entry = menuEntry(harness, NS)
+  assert.ok(entry, 'the delete row is registered in the session menu slot')
+  const menuOpen = []
+  const element = entry.Component({
+    sessionId: session.id,
+    displayTitle: session.title,
+    useMenuOpenState: () => [false, (value) => menuOpen.push(value)],
+    t: harness.t,
+  })
+  return { element, menuOpen }
+}
+
+/** Render the "Select multiple" row. */
+function selectRow(harness) {
+  const entry = menuEntry(harness, `${NS}-multi`)
+  assert.ok(entry, 'the multi-select row is registered in the session menu slot')
+  const menuOpen = []
+  const element = entry.Component({
+    useMenuOpenState: () => [false, (value) => menuOpen.push(value)],
+    t: harness.t,
+  })
+  return { element, menuOpen }
+}
+
+/** The element tree the dialog slot occupant renders, or null while closed. */
+function dialogElement(harness) {
+  const entry = overlayEntry(harness)
+  assert.ok(entry, 'the dialog is registered in the shell.overlay slot')
+  return entry.Component({ t: harness.t })
+}
+
+/** Pull the pieces out of the rendered Modal element tree. */
+function dialogParts(harness) {
+  const modal = dialogElement(harness)
+  if (modal === null || modal === undefined) return null
+  const kids = (modal.props.children ?? []).filter(Boolean)
+  const buttons = (modal.props.footer?.props?.children ?? []).filter(Boolean)
+  const byKey = (key) => kids.find((node) => node.props.key === key) ?? null
+  const skipLabel = byKey('skip')
   return {
-    menu,
-    selectItem: viewport.querySelector('[data-dsh-delete-session="select"]'),
-    deleteItem: viewport.querySelector('[data-dsh-delete-session="1"]'),
+    modal,
+    type: modal.type,
+    title: modal.props.title,
+    open: modal.props.open,
+    desc: byKey('desc')?.props.children ?? null,
+    skip: skipLabel === null ? null : skipLabel.props.children[0],
+    error: byKey('error'),
+    cancel: buttons[0],
+    confirm: buttons[1],
   }
 }
 
-/**
- * Fire the observers the plugin installed. Useful only *inside* multi-select,
- * where enterSelection() registered one whose callback runs decorateRows. Outside
- * the mode the sole observer scans for menus and decorates nothing, so an outside
- * pass has to go through a delete path instead (see decorateViaSingleDelete).
- */
-function observerPass(harness) {
-  for (const observer of harness.observers) observer.callback()
-}
 const rowCheckboxes = (harness) =>
   harness.rows.map((row) => row.querySelectorAll(':scope > .dsdel-check').length)
 
@@ -414,47 +475,154 @@ const selectedCheckboxes = (harness) =>
 const bar = (harness) =>
   walk(harness.document.body).find((node) => node._classes.has('dsdel-bar')) ?? null
 
-/** The consent dialog the plugin appended to the body, if it is open. */
-const dialog = (harness) =>
-  walk(harness.document.body).find((node) => node._classes.has('dsdel-dialog')) ?? null
-
-const dialogParts = (harness) => {
-  const box = dialog(harness)
-  if (box === null) return null
-  const nodes = walk(box)
-  const checkboxes = nodes.filter((node) => node.tagName === 'INPUT' && node.type === 'checkbox')
-  const buttons = nodes.filter((node) => node._classes.has('dsdel-btn'))
-  return {
-    box,
-    skip: checkboxes[0] ?? null,
-    cancel: buttons.find((b) => !b._classes.has('dsdel-danger')) ?? null,
-    confirm: buttons.find((b) => b._classes.has('dsdel-danger')) ?? null,
-    title: nodes.find((node) => node._classes.has('dsdel-title'))?.textContent ?? null,
-  }
-}
-
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 /** Let the queued rAF decorate passes drain. */
 const flush = async () => { await tick() }
 
 /**
+ * Fire the observers multi-select installed. Outside the mode the plugin installs
+ * none at all now that the menu is a slot rather than a portalled DOM node, so an
+ * outside pass has to go through a delete path instead (see decorateViaSingleDelete).
+ */
+function observerPass(harness) {
+  for (const observer of harness.observers) observer.callback()
+}
+
+/**
  * Run one decorate pass outside multi-select, through the real user route.
  *
  * `decorateRows()` is a private closure and is deliberately not reachable from a
  * test. Outside the mode no observer decorates either, so the only passes are the
- * plugin's own internal calls from the delete paths. This drives the delete
- * dialog, whose confirm handler is the exact call site the bug shipped from.
+ * plugin's own internal calls from the delete paths. This drives the delete row
+ * and the dialog it opens, whose confirm handler is the exact call site the bug
+ * shipped from.
  */
 async function decorateViaSingleDelete(harness, session = SESSION_A) {
-  const { deleteItem } = openSessionMenu(harness, session)
-  assert.ok(deleteItem, 'the Delete item was injected into the session menu')
-  deleteItem.fire('click')
+  const { element } = deleteRow(harness, session)
+  element.props.onSelect({ shiftKey: false })
   const parts = dialogParts(harness)
   assert.ok(parts, 'the delete dialog opened')
-  parts.confirm.fire('click')
+  parts.confirm.props.onClick()
   await tick()
 }
+
+// --- the integration contract the slot migration introduced -----------------
+
+test('the two menu rows register into the official session-menu slot', async () => {
+  const harness = await loadPlugin()
+  const del = menuEntry(harness, NS)
+  const multi = menuEntry(harness, `${NS}-multi`)
+
+  assert.ok(del, 'a delete row is registered')
+  assert.ok(multi, 'a multi-select row is registered')
+  // A package-namespaced id keeps the rows beside the shipped
+  // pin(100)/rename(200)/fork(300)/archive(400)/session-id(450).
+  assert.equal(del.spec.id, 'dsh-delete-session')
+  assert.equal(multi.spec.id, 'dsh-delete-session-multi')
+  assert.equal(del.spec.order, 410, 'the delete row sits directly under archive (400)')
+  assert.equal(multi.spec.order, 409, 'the multi-select row sits above the delete row')
+  assert.equal(del.spec.locale, NS, 'labels come from the package locale namespace')
+})
+
+test('the dialog registers into shell.overlay and renders the host Modal', async () => {
+  const harness = await loadPlugin()
+  const entry = overlayEntry(harness)
+  assert.ok(entry, 'a shell.overlay entry is registered')
+  assert.equal(entry.spec.id, 'dsh-delete-session-dialog')
+
+  assert.equal(dialogElement(harness), null, 'nothing renders while no delete is pending')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  const parts = dialogParts(harness)
+  assert.ok(parts, 'the dialog renders once a delete is requested')
+  assert.equal(parts.type, harness.primitives.Modal, 'it is the host Modal primitive, not a hand-built backdrop')
+  assert.equal(parts.open, true)
+  assert.equal(parts.title, '删除会话')
+  assert.equal(parts.cancel.type, harness.primitives.Button)
+  assert.equal(parts.confirm.type, harness.primitives.Button)
+})
+
+test('the menu rows dismiss the menu through the injected hook', async () => {
+  const harness = await loadPlugin()
+  const del = deleteRow(harness)
+  del.element.props.onSelect({ shiftKey: false })
+  assert.deepEqual(del.menuOpen, [false], 'the delete row closes the menu after acting')
+
+  const multi = selectRow(harness)
+  multi.element.props.onSelect()
+  assert.deepEqual(multi.menuOpen, [false], 'the multi-select row closes the menu after acting')
+})
+
+test('the plugin no longer scans the DOM for a portalled menu', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  // The old build installed a MutationObserver on body at apply() time to hunt
+  // for `body > [role="menu"]`. The only observer left is the one multi-select
+  // installs for row decoration.
+  assert.equal(harness.observers.length, 0, 'no observer is installed before multi-select starts')
+})
+
+test('the locale namespace is registered even when the locale service arrives late', async () => {
+  const harness = await loadPlugin({ lateLocale: true })
+  assert.ok(harness.locales[NS], 'the namespace was registered through the inject path')
+  assert.equal(harness.locales[NS].zh.multiSelect, '多选')
+  assert.equal(harness.locales[NS].zh.menu, '删除会话')
+
+  // The rows must render real labels, not raw keys, on that path too.
+  assert.equal(deleteRow(harness).element.props.children, '删除会话')
+  assert.equal(selectRow(harness).element.props.children, '多选')
+})
+
+test('the delete row asks the host for its danger styling', async () => {
+  const harness = await loadPlugin()
+  const { element } = deleteRow(harness)
+  // ui-primitives' MenuItemButton takes a real `danger` parameter; colouring the
+  // label by hand would leave the icon unstyled, which is the regression this
+  // guards.
+  assert.equal(element.props.danger, true, 'the row uses the host danger tone')
+  assert.equal(element.type, harness.primitives.MenuItemButton, 'the row renders through the host primitive')
+  // The migration must not change how the menu looks, so no separator is added.
+  // This guards against re-introducing the separator on a later pass.
+  assert.equal(selectRow(harness).element.props.separatorBefore, undefined, 'no separator is injected')
+})
+
+test('the delete row reads its session id from the host props, not from a fiber', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+  // Give the row a fiber-shaped property and NO data-row-key: the plugin must
+  // ignore React internals entirely now.
+  row.__reactFiber$test = { memoizedProps: { node: { id: SESSION_A.id } }, return: null }
+
+  assert.equal(totalCheckboxes(harness), 0)
+
+  const { element } = deleteRow(harness, SESSION_A)
+  await flush()
+  element.props.onSelect({ shiftKey: false })
+  const parts = dialogParts(harness)
+  assert.ok(parts, 'the dialog opened for the id the host injected')
+  assert.equal(harness.requests.length, 0, 'opening the dialog sends nothing yet')
+})
+
+test('shift-click forces the dialog even after asking was turned off', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  localStorage.setItem(SKIP_KEY, '1')
+
+  // Plain select honours the opt-out and deletes straight away.
+  const plain = deleteRow(harness)
+  plain.element.props.onSelect({ shiftKey: false })
+  await tick()
+  assert.equal(dialogElement(harness), null, 'no dialog when asking is off')
+  assert.equal(harness.requests.length, 1, 'the delete went out immediately')
+
+  // Shift-click always asks.
+  const forced = deleteRow(harness)
+  forced.element.props.onSelect({ shiftKey: true })
+  assert.ok(dialogParts(harness), 'shift-click brings the dialog back')
+  assert.equal(harness.requests.length, 1, 'and still sends nothing until confirmed')
+})
 
 // --- the regression ---------------------------------------------------------
 
@@ -478,15 +646,13 @@ test('deleting one session through the dialog leaves no half-on multi-select', a
   mountRow(harness, SESSION_A)
   const otherRow = mountRow(harness, SESSION_B)
 
-  const { deleteItem } = openSessionMenu(harness, SESSION_A)
-  assert.ok(deleteItem, 'the Delete item was injected into the session menu')
-
-  deleteItem.fire('click')
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
   const parts = dialogParts(harness)
   assert.ok(parts, 'the delete dialog opened')
-  assert.equal(parts.confirm.disabled, false, 'confirm is ready without an ack')
+  assert.equal(parts.confirm.props.disabled, false, 'confirm is ready without an ack')
 
-  parts.confirm.fire('click')
+  parts.confirm.props.onClick()
   await tick()
 
   // This is the assertion the old build failed: the confirm handler added the id
@@ -514,15 +680,14 @@ test('multi-select still plants exactly one checkbox per selectable row', async 
   mountRow(harness, SESSION_A)
   mountRow(harness, SESSION_B)
 
-  const { selectItem } = openSessionMenu(harness, SESSION_A)
-  assert.ok(selectItem, 'the multi-select item was injected')
-  selectItem.fire('click')
+  selectRow(harness).element.props.onSelect()
   await flush()
 
   assert.deepEqual(rowCheckboxes(harness), [1, 1], 'one checkbox per row, and only one')
   assert.equal(totalCheckboxes(harness), 2)
   assert.ok(bar(harness), 'the batch bar exists in selection mode')
   assert.equal(selectedCheckboxes(harness), 0, 'nothing is selected yet')
+  assert.equal(harness.observers.length, 1, 'multi-select installs exactly one row observer')
 })
 
 test('a later decorate pass reuses the checkbox instead of stacking another', async () => {
@@ -530,7 +695,7 @@ test('a later decorate pass reuses the checkbox instead of stacking another', as
   mountRow(harness, SESSION_A)
   mountRow(harness, SESSION_B)
 
-  openSessionMenu(harness, SESSION_A).selectItem.fire('click')
+  selectRow(harness).element.props.onSelect()
   await flush()
   const before = harness.rows.map((row) => row.querySelectorAll(':scope > .dsdel-check')[0])
 
@@ -551,7 +716,7 @@ test('clicking a row toggles its checkbox on and off', async () => {
   const first = mountRow(harness, SESSION_A)
   mountRow(harness, SESSION_B)
 
-  openSessionMenu(harness, SESSION_A).selectItem.fire('click')
+  selectRow(harness).element.props.onSelect()
   await flush()
 
   // The capture handler resolves the row from `e.target.closest('[role=treeitem]')`,
@@ -576,7 +741,7 @@ test('leaving multi-select strips every checkbox', async () => {
   mountRow(harness, SESSION_A)
   mountRow(harness, SESSION_B)
 
-  openSessionMenu(harness, SESSION_A).selectItem.fire('click')
+  selectRow(harness).element.props.onSelect()
   await flush()
   const control = bar(harness)
   assert.ok(control, 'the bar exists')
@@ -599,7 +764,7 @@ test('entering, leaving, then deleting plants nothing', async () => {
   mountRow(harness, SESSION_A)
   mountRow(harness, SESSION_B)
 
-  openSessionMenu(harness, SESSION_A).selectItem.fire('click')
+  selectRow(harness).element.props.onSelect()
   await flush()
   const control = bar(harness)
   control.querySelector('.dsdel-bar-btn:not(.dsdel-bar-danger)').fire('click', { stopPropagation() {} })
@@ -613,17 +778,17 @@ test('entering, leaving, then deleting plants nothing', async () => {
   assert.notEqual(control.style.display, 'flex', 'the bar stays hidden')
 })
 
-test('a row whose fiber changes still gets no checkbox outside the mode', async () => {
+test('a row whose row key changes still gets no checkbox outside the mode', async () => {
   const harness = await loadPlugin()
   const row = mountRow(harness, SESSION_A)
 
   await decorateViaSingleDelete(harness, SESSION_A)
   assert.equal(row.querySelectorAll(':scope > .dsdel-check').length, 0)
 
-  // The host re-rendered and swapped the fiber; the next pass must still not plant.
-  row.__reactFiber$test = { memoizedProps: { node: { id: SESSION_B.id, title: SESSION_B.title } }, return: null }
+  // The host re-rendered and repointed the row; the next pass must still not plant.
+  row.setAttribute('data-row-key', `session:${SESSION_B.id}`)
   await decorateViaSingleDelete(harness, SESSION_B)
-  assert.equal(totalCheckboxes(harness), 0, 'a changed fiber does not revive the bug')
+  assert.equal(totalCheckboxes(harness), 0, 'a changed row key does not revive the bug')
 })
 
 test('a row without a session id is skipped in both modes', async () => {
@@ -635,10 +800,40 @@ test('a row without a session id is skipped in both modes', async () => {
   harness.rows.push(orphan)
 
   await decorateViaSingleDelete(harness, SESSION_A)
-  openSessionMenu(harness, SESSION_A).selectItem.fire('click')
+  selectRow(harness).element.props.onSelect()
   await flush()
 
   assert.equal(orphan.querySelectorAll(':scope > .dsdel-check').length, 0, 'no id, no checkbox')
+})
+
+test('multi-select ignores React internals: a fiber alone never makes a row selectable', async () => {
+  const harness = await loadPlugin()
+  const row = harness.document.createElement('div')
+  row.className = 'session_row'
+  row.setAttribute('role', 'treeitem')
+  // Exactly the shape the old build walked: a fiber carrying `node.id`.
+  row.__reactFiber$test = { memoizedProps: { node: { id: SESSION_A.id, title: SESSION_A.title } }, return: null }
+  harness.document.body.appendChild(row)
+  harness.rows.push(row)
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  assert.equal(
+    row.querySelectorAll(':scope > .dsdel-check').length,
+    0,
+    'row identity comes from the host key, never from the fiber tree',
+  )
+
+  // Give it the host's own key and it becomes selectable.
+  row.setAttribute('data-row-key', `session:${SESSION_A.id}`)
+  observerPass(harness)
+  await flush()
+  assert.equal(
+    row.querySelectorAll(':scope > .dsdel-check').length,
+    1,
+    'the host data-row-key is what makes a row selectable',
+  )
 })
 
 test('residue left by an older build is swept away by the next pass', async () => {
@@ -659,10 +854,13 @@ test('residue left by an older build is swept away by the next pass', async () =
 
 // --- the plugin page: "ask before deleting" (slot plugins.row.config) -------
 
-const SKIP_KEY = 'dsh-delete-session:skip-confirm'
 const rowConfig = (harness) =>
   harness.slotRegistrations.find((entry) => entry.spec.name === 'plugins.row.config') ?? null
-const pageCheckbox = (harness, view = 'page') => rowConfig(harness).Component({ view }).props.children[0]
+// The registration carries no `locale`, so the host injects no `t` into this
+// entry. Rendering it exactly that way is what keeps the module-level fallback
+// honest - a card that only worked with an injected `t` would crash in the app.
+const pageCheckbox = (harness, view = 'page') =>
+  rowConfig(harness).Component({ view }).props.children[0]
 
 test('the plugin page registers a row.config entry under the bundle#row key', async () => {
   const harness = await loadPlugin()
@@ -687,11 +885,11 @@ test('the page checkbox starts ticked and unticking it deletes without a dialog'
   pageCheckbox(harness).props.onChange(false)
   assert.equal(localStorage.getItem(SKIP_KEY), '1', 'unticking stores the opt-out')
 
-  const { deleteItem } = openSessionMenu(harness, SESSION_A)
-  deleteItem.fire('click')
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
   await tick()
 
-  assert.equal(dialog(harness), null, 'no dialog opens once asking is off')
+  assert.equal(dialogElement(harness), null, 'no dialog opens once asking is off')
   assert.equal(
     harness.requests.filter((call) => call.url === '/dsh-delete-session/delete').length,
     1,
@@ -704,13 +902,29 @@ test("the dialog's don't-ask-again flips the page checkbox off", async () => {
   mountRow(harness, SESSION_A)
   assert.equal(pageCheckbox(harness).props.checked, true)
 
-  const { deleteItem } = openSessionMenu(harness, SESSION_A)
-  deleteItem.fire('click')
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
   const parts = dialogParts(harness)
-  parts.skip.checked = true
-  parts.confirm.fire('click')
+  parts.skip.props.onChange({ target: { checked: true } })
+  parts.confirm.props.onClick()
   await tick()
 
   assert.equal(localStorage.getItem(SKIP_KEY), '1', 'the dialog stored the opt-out')
   assert.equal(pageCheckbox(harness).props.checked, false, 'the page checkbox reflects it')
+})
+
+test('ticking don\'t-ask-again and then cancelling changes nothing', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  const parts = dialogParts(harness)
+  parts.skip.props.onChange({ target: { checked: true } })
+  parts.cancel.props.onClick()
+  await tick()
+
+  assert.equal(localStorage.getItem(SKIP_KEY), null, 'the preference was never committed')
+  assert.equal(dialogElement(harness), null, 'the dialog closed')
+  assert.equal(harness.requests.length, 0, 'and nothing was deleted')
 })

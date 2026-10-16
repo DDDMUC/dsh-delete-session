@@ -1,20 +1,29 @@
 // dsh-delete-session - client half.
 //
-// DSH's sidebar session-row "..." menu (rename / fork / archive) is rendered
-// by the core UI and offers no plugin slot for extra rows, so the delete item
-// is injected at the DOM level:
+// Integration is entirely through the host's public slot contract - no menu
+// scraping, no React internals:
 //
-//   * watch for the portalled session menu (body > [role="menu"]);
-//   * walk the React fiber chain from that menu to the session node and read
-//     its real id (props.node.id) - no title matching, no conversation jump;
-//   * clone a native menu row so the new item keeps the core styling;
-//   * open a risk-consent dialog and POST /dsh-delete-session/delete.
+//   * `sidebar.workspaces.session.menu.item` - two rows registered beside the
+//     shipped pin/rename/fork/archive rows: "Select multiple" (order 409) and
+//     "Delete session" (order 410, in the host's danger colour). Each entry
+//     renders one `role="menuitem"` button through ui-primitives'
+//     `MenuItemButton`, so it inherits the host styling and joins the menu's
+//     own keyboard walk and focus return.
+//   * `shell.overlay` - the confirmation dialog, rendered with the host's
+//     `Modal` primitive instead of a hand-built backdrop.
+//   * `plugins.row.config` - the plugin page card that decides whether a
+//     delete asks first.
 //
-// The module is a classic client bundle (client-modules protocol): it
-// registers a factory with window.__ModuleLoader__ and returns apply().
-// The menu injection and dialog are DOM-only (theme tokens, no SDK) so they
-// survive core UI revisions that keep the menu contract; React is pulled in
-// only for the plugin-page settings card (slot `plugins.row.config`).
+// The one surface with no usable slot is the multi-select checkbox on each
+// Session row: `sidebar.session.row.leading` is the *else* branch of the host's
+// `showStatus ? <SessionStatusDots/> : renderSlot(...)`, so it disappears the
+// moment a row is busy - exactly when a batch delete is most likely. Those
+// checkboxes therefore stay a DOM decoration over `[role="treeitem"]`, and row
+// identity comes from the host's own `data-row-key="session:<id>"` attribute
+// rather than from a walk up the React fiber tree.
+//
+// The module is a classic client bundle (client-modules protocol): it registers
+// a factory with `window.__ModuleLoader__` and returns apply().
 window.__ModuleLoader__.load({
   id: 'dsh-delete-session',
   factory: (require) => {
@@ -22,8 +31,11 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
 
+    const { createElement: h, Fragment } = react
+
     const zh = {
       menu: '删除会话',
+      multiSelect: '多选',
       title: '删除会话',
       desc: '将永久删除该会话及其全部对话记录（会话日志、工作区记账与统计），此操作不可恢复。',
       cancel: '取消',
@@ -35,7 +47,6 @@ window.__ModuleLoader__.load({
       busy: '该会话正被 DSH 打开，删除未能完成；请稍后重试（通常几秒后即可），或重启 DSH 后再试。',
       notFound: '未找到该会话（可能已被删除）。',
       untitled: '未命名会话',
-      multiSelect: '多选',
       cancelSelect: '取消',
       selectedCount: (n) => `已选 ${n} 个`,
       batchRunning: (done, total) => `正在删除 ${done}/${total}…`,
@@ -52,6 +63,7 @@ window.__ModuleLoader__.load({
 
     const en = {
       menu: 'Delete session',
+      multiSelect: 'Select multiple',
       title: 'Delete session',
       desc: 'This permanently deletes the session and all of its conversation records (log, workspace accounting and statistics). This action cannot be undone.',
       cancel: 'Cancel',
@@ -63,7 +75,6 @@ window.__ModuleLoader__.load({
       busy: 'This session is currently open in DSH; the delete did not complete. Try again in a moment (usually a few seconds), or restart DSH and retry.',
       notFound: 'Session not found (it may already be deleted).',
       untitled: 'Untitled session',
-      multiSelect: 'Select multiple',
       cancelSelect: 'Cancel',
       selectedCount: (n) => `${n} selected`,
       batchRunning: (done, total) => `Deleting ${done}/${total}...`,
@@ -78,14 +89,103 @@ window.__ModuleLoader__.load({
       pageSummaryAuto: 'Delete without asking',
     }
 
-    let localeSvc = null
     let sessionsSvc = null
+    let localeSvc = null
 
-    // Once the user opts out ("删除时询问" unticked - either in the plugin page
-    // or via the dialog's "don't ask again") the confirmation dialog is skipped
-    // and the menu item deletes directly. Shift+click always opens the dialog
-    // again. The plugin page's checkbox and the dialog read the same key, and a
-    // subscription keeps the card in step when either one flips it.
+    function browserLang() {
+      if (typeof navigator === 'undefined') return 'zh'
+      for (const tag of (navigator.languages || []).concat([navigator.language])) {
+        const primary = String(tag || '').toLowerCase().split('-')[0]
+        if (primary === 'zh' || primary === 'en') return primary
+      }
+      return 'zh'
+    }
+
+    // The DOM decoration layer (row checkboxes, batch bar, toast) is not a slot
+    // occupant, so it has no injected `t`; it uses the built-in dictionaries and
+    // honours the registered `locale` namespace when the host provides one.
+    // Slot components receive the host-injected `t` and use that instead.
+    function t(key, a, b) {
+      if (localeSvc && typeof localeSvc.translate === 'function') {
+        try {
+          const text = localeSvc.translate(NS, key)
+          if (typeof text === 'string' && text !== key) return text
+        } catch {
+          // fall back to the built-in dictionaries
+        }
+      }
+      const value = (browserLang() === 'en' ? en : zh)[key]
+      return typeof value === 'function' ? value(a, b) : value || key
+    }
+
+    // --- state -----------------------------------------------------------------
+    // One module-level store shared by the slot components and the DOM layer.
+    // Components read it through `useSnapshot`, so each stays a plain function of
+    // the store with no local state - which also keeps it drivable from the
+    // offline test without a React renderer.
+
+    const state = {
+      /** { sessionId, title, busy, error, skip } while a confirmation dialog is up. */
+      dialog: null,
+      selecting: false,
+      selected: new Set(),
+      /** Rows hidden optimistically while their delete request is in flight. */
+      pending: new Set(),
+      /** { total, done, failed } while a batch delete runs, else null. */
+      batch: null,
+    }
+
+    const listeners = new Set()
+
+    function buildSnapshot() {
+      return {
+        dialog: state.dialog,
+        selecting: state.selecting,
+        selected: state.selected,
+        pending: state.pending,
+        batch: state.batch,
+        selectedCount: state.selected.size,
+      }
+    }
+
+    // `useSyncExternalStore` needs a value that is stable between notifications.
+    let snapshot = buildSnapshot()
+
+    function getSnapshot() {
+      return snapshot
+    }
+
+    function subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    }
+
+    function publish() {
+      snapshot = buildSnapshot()
+      for (const listener of listeners) {
+        try { listener() } catch { /* a subscriber must not break the mutation */ }
+      }
+      scheduleDecorate()
+    }
+
+    // `useSyncExternalStore` where the host's React has it (React 18+), otherwise
+    // a subscribe/effect pair. Chosen once at module scope, so no hook is called
+    // conditionally during a render.
+    const useSnapshot = typeof react.useSyncExternalStore === 'function'
+      ? () => react.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+      : () => {
+          const [value, setValue] = react.useState(getSnapshot)
+          react.useEffect(() => subscribe(() => setValue(getSnapshot())), [])
+          return value
+        }
+
+    // --- confirmation preference ----------------------------------------------
+
+    // Once the user opts out ("删除时询问" unticked - either in the plugin page or
+    // via the dialog's "don't ask again") the confirmation dialog is skipped and
+    // the menu item deletes directly. The plugin page's checkbox and the dialog
+    // read the same key, and a subscription keeps the card in step when either
+    // one flips it.
     const SKIP_KEY = 'dsh-delete-session:skip-confirm'
     const skipListeners = new Set()
 
@@ -109,6 +209,8 @@ window.__ModuleLoader__.load({
       return () => { skipListeners.delete(listener) }
     }
 
+    // --- host calls ------------------------------------------------------------
+
     function postDelete(sessionId) {
       return fetch('/dsh-delete-session/delete', {
         method: 'POST',
@@ -130,12 +232,22 @@ window.__ModuleLoader__.load({
       })
     }
 
-    // --- current-session handoff ------------------------------------------------
+    function refreshList() {
+      const svc = sessionsSvc
+      if (svc) {
+        try {
+          if (typeof svc.refresh === 'function') { svc.refresh(); return }
+          if (typeof svc.refreshList === 'function') { svc.refreshList(); return }
+        } catch {
+          // fall through to reload
+        }
+      }
+      try { window.location.reload() } catch { /* ignore */ }
+    }
 
     // Deleting the session the main view is showing leaves the app to restore a
-    // stale neighbour (on 0.1.7 it lands on an unavailable Agent Team row with a
-    // disabled composer), which reads as "the delete did not work". When the
-    // deleted session is the one the app has open, open a fresh session instead.
+    // stale neighbour (an unavailable Agent Team row with a disabled composer),
+    // which reads as "the delete did not work". Open a fresh session instead.
     function deletedVariants(id) {
       return id.startsWith('session-') ? [id, id.slice('session-'.length)] : [id, `session-${id}`]
     }
@@ -168,83 +280,11 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function deleteNow(info) {
-      pendingRemoval.add(info.id)
-      scheduleDecorate()
-      postDelete(info.id)
-        .then(() => {
-          toast(t('done'))
-          refreshList()
-          settlePendingSoon()
-          leaveIfCurrent(info.id)
-        })
-        .catch((reason) => {
-          pendingRemoval.delete(info.id)
-          scheduleDecorate()
-          toast(t('failed') + String((reason && reason.message) || reason), true)
-        })
-    }
-
-    function browserLang() {
-      if (typeof navigator === 'undefined') return 'zh'
-      for (const tag of (navigator.languages || []).concat([navigator.language])) {
-        const primary = String(tag || '').toLowerCase().split('-')[0]
-        if (primary === 'zh' || primary === 'en') return primary
-      }
-      return 'zh'
-    }
-
-    function t(key) {
-      if (localeSvc && typeof localeSvc.translate === 'function') {
-        try {
-          const text = localeSvc.translate(NS, key)
-          if (typeof text === 'string' && text !== key) return text
-        } catch {
-          // fall back to the built-in dictionaries
-        }
-      }
-      return (browserLang() === 'en' ? en : zh)[key] || key
-    }
-
-    // --- fiber access ----------------------------------------------------------
-
-    function findFiber(el) {
-      const key = Object.keys(el).find((k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'))
-      return key ? el[key] : null
-    }
-
-    // Walk up from the portalled menu element to the session row component
-    // that carries `node.id`. A menu without such a node is not a session
-    // menu (settings, header dropdowns) and is left alone.
-    function sessionInfoFromMenu(menuEl) {
-      let fiber = findFiber(menuEl)
-      let guard = 0
-      while (fiber && guard++ < 300) {
-        const props = fiber.memoizedProps
-        if (props && props.node && typeof props.node.id === 'string' && props.node.id) {
-          const title = props.node.title || props.node.name || null
-          return { id: props.node.id, title: typeof title === 'string' ? title : null }
-        }
-        fiber = fiber.return
-      }
-      return null
-    }
-
     // --- styles ----------------------------------------------------------------
+    // Only what the DOM decoration layer owns. The confirmation dialog is the
+    // host's `Modal`, so it brings no backdrop CSS of its own.
 
     const CSS = [
-      '.dsdel-backdrop{position:fixed;inset:0;z-index:2147483600;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;padding:16px}',
-      '.dsdel-dialog{width:min(420px,92vw);border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));border-radius:14px;padding:18px;box-shadow:0 16px 48px rgba(0,0,0,.32);display:flex;flex-direction:column;gap:12px;color:var(--dsw-alias-label-primary,inherit);background:linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),var(--dsw-alias-bg-base,#fff);-webkit-backdrop-filter:blur(18px) saturate(140%);backdrop-filter:blur(18px) saturate(140%)}',
-      '.dsdel-title{font-size:15px;font-weight:650;color:var(--dsw-alias-label-primary,inherit);margin:0}',
-      '.dsdel-text{font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);margin:0;word-break:break-all}',
-      '.dsdel-meta{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#888);margin:0;word-break:break-all}',
-      '.dsdel-ack{display:flex;align-items:center;gap:8px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);cursor:pointer}',
-      '.dsdel-ack input{width:15px;height:15px;accent-color:var(--dsw-alias-state-error-primary,#e5484d);cursor:pointer;flex:none}',
-      '.dsdel-error{font-size:12px;line-height:16px;color:var(--dsw-alias-state-error-primary,#e5484d);margin:0}',
-      '.dsdel-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}',
-      '.dsdel-btn{appearance:none;min-height:32px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
-      '.dsdel-btn:disabled{opacity:.5;cursor:default}',
-      '.dsdel-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
       '.dsdel-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 25%,transparent);padding:9px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:min(92vw,460px);cursor:pointer}',
       '.dsdel-check{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.5));background:transparent;flex:none;margin-right:8px;box-sizing:border-box;cursor:pointer}',
       '.dsdel-check-on{background:var(--dsw-alias-state-business-primary,#4c6ef5);border-color:var(--dsw-alias-state-business-primary,#4c6ef5)}',
@@ -258,9 +298,18 @@ window.__ModuleLoader__.load({
       '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
       '.dsdel-page{display:flex;flex-direction:column;gap:8px}',
       '.dsdel-page-hint{margin:0;color:var(--dsw-alias-label-tertiary,#888);font-size:13px;line-height:20px}',
+      '.dsdel-modal-text{margin:0;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-all}',
+      '.dsdel-modal-meta{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#888);word-break:break-all}',
+      '.dsdel-modal-error{margin:8px 0 0;font-size:12px;line-height:16px;color:var(--dsw-alias-state-error-primary,#e5484d)}',
+      // ui-primitives' `Button` has no danger variant (the host styles its own
+      // destructive buttons with a package-local CSS-module class), so the
+      // confirm button carries this class instead.
+      '.dsdel-danger-btn{border-color:var(--dsw-alias-state-error-primary,#e5484d)!important;background:var(--dsw-alias-state-error-primary,#e5484d)!important;color:#fff!important}',
+      '.dsdel-danger-btn:disabled{opacity:.5}',
     ].join('')
 
     function ensureStyle() {
+      if (typeof document === 'undefined') return
       if (document.querySelector('style[data-dsh-delete-session]')) return
       const style = document.createElement('style')
       style.dataset.dshDeleteSession = '1'
@@ -270,12 +319,8 @@ window.__ModuleLoader__.load({
 
     // --- feedback --------------------------------------------------------------
 
-    function closeMenu() {
-      try { document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) } catch { /* ignore */ }
-      try { document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })) } catch { /* ignore */ }
-    }
-
     function toast(text, isError) {
+      if (typeof document === 'undefined' || !document.body) return
       const el = document.createElement('div')
       el.className = 'dsdel-toast'
       el.setAttribute('role', 'status')
@@ -290,154 +335,39 @@ window.__ModuleLoader__.load({
       setTimeout(kill, 3200)
     }
 
-    function refreshList() {
-      const svc = sessionsSvc
-      if (svc) {
-        try {
-          if (typeof svc.refresh === 'function') { svc.refresh(); return }
-          if (typeof svc.refreshList === 'function') { svc.refreshList(); return }
-        } catch {
-          // fall through to reload
-        }
-      }
-      try { window.location.reload() } catch { /* ignore */ }
-    }
-
-    // --- dialog ----------------------------------------------------------------
-
-    function openDialog(info) {
-      ensureStyle()
-      const backdrop = document.createElement('div')
-      backdrop.className = 'dsdel-backdrop'
-      const dialog = document.createElement('div')
-      dialog.className = 'dsdel-dialog'
-
-      const title = document.createElement('h3')
-      title.className = 'dsdel-title'
-      title.textContent = t('title')
-
-      const meta = document.createElement('p')
-      meta.className = 'dsdel-meta'
-      meta.textContent = `${info.title || t('untitled')} · ${info.id}`
-
-      const text = document.createElement('p')
-      text.className = 'dsdel-text'
-      text.textContent = t('desc')
-
-      const skip = document.createElement('label')
-      skip.className = 'dsdel-ack'
-      const skipBox = document.createElement('input')
-      skipBox.type = 'checkbox'
-      const skipText = document.createElement('span')
-      skipText.textContent = t('dontAsk')
-      skip.appendChild(skipBox)
-      skip.appendChild(skipText)
-
-      const error = document.createElement('p')
-      error.className = 'dsdel-error'
-      error.style.display = 'none'
-
-      const actions = document.createElement('div')
-      actions.className = 'dsdel-actions'
-      const cancel = document.createElement('button')
-      cancel.type = 'button'
-      cancel.className = 'dsdel-btn'
-      cancel.textContent = t('cancel')
-      const confirm = document.createElement('button')
-      confirm.type = 'button'
-      confirm.className = 'dsdel-btn dsdel-danger'
-      confirm.textContent = t('confirm')
-      actions.appendChild(cancel)
-      actions.appendChild(confirm)
-
-      dialog.appendChild(title)
-      dialog.appendChild(meta)
-      dialog.appendChild(text)
-      dialog.appendChild(skip)
-      dialog.appendChild(error)
-      dialog.appendChild(actions)
-      backdrop.appendChild(dialog)
-      document.body.appendChild(backdrop)
-
-      let busy = false
-      const close = () => {
-        if (busy) return
-        backdrop.remove()
-      }
-      cancel.addEventListener('click', close)
-      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close() })
-      backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
-
-      confirm.addEventListener('click', () => {
-        if (busy) return
-        busy = true
-        confirm.disabled = true
-        cancel.disabled = true
-        confirm.textContent = t('deleting')
-        error.style.display = 'none'
-        if (skipBox.checked) setSkipConfirm(true)
-        pendingRemoval.add(info.id)
-        scheduleDecorate()
-        postDelete(info.id)
-          .then(() => {
-            backdrop.remove()
-            toast(t('done'))
-            refreshList()
-            settlePendingSoon()
-            leaveIfCurrent(info.id)
-          })
-          .catch((reason) => {
-            busy = false
-            pendingRemoval.delete(info.id)
-            scheduleDecorate()
-            confirm.disabled = false
-            cancel.disabled = false
-            confirm.textContent = t('confirm')
-            error.textContent = t('failed') + String((reason && reason.message) || reason)
-            error.style.display = 'block'
-          })
-      })
-    }
-
-    // --- multi-select ----------------------------------------------------------
-    // Entered from the session menu ("多选"). While active, every session row
-    // gets a round checkbox, clicking a row toggles it instead of opening the
-    // conversation, and a bottom bar runs the batch delete. No select-all and
-    // no per-row disabling: every row is selectable and the batch deletes
+    // --- multi-select row decoration -------------------------------------------
+    // Entered from the session menu ("多选"). While active, every session row gets
+    // a round checkbox, clicking a row toggles it instead of opening the
+    // conversation, and a bottom bar runs the batch delete. No select-all and no
+    // per-row disabling: every row is selectable and the batch deletes
     // immediately (the single-session flow keeps its own consent dialog).
 
-    let selecting = false
-    const selected = new Set()
-    // 乐观 UI：已发出删除请求的行立即隐藏（decorate 时持续生效，React 重渲染也不会闪回）；
-    // 请求失败时从集合移除，行随下一次 decorate 恢复显示。
-    const pendingRemoval = new Set()
-    let batchRunning = false
-    let batchTotal = 0
-    let batchDone = 0
-    let batchFailed = 0
     let bar = null
     let decorateRaf = null
     let rowObserver = null
 
+    // Row identity comes from the host's own drag-and-drop key rather than from
+    // React internals: every Session row carries `data-row-key="session:<id>"`.
+    // A row without it is simply not selectable.
+    const ROW_KEY_PREFIX = 'session:'
+
     function sessionIdFromRow(row) {
-      let fiber = findFiber(row)
-      let guard = 0
-      while (fiber && guard++ < 300) {
-        const props = fiber.memoizedProps
-        if (props && props.node && typeof props.node.id === 'string' && props.node.id) return props.node.id
-        fiber = fiber.return
-      }
-      return null
+      if (!row || typeof row.getAttribute !== 'function') return null
+      const key = row.getAttribute('data-row-key')
+      if (typeof key !== 'string' || !key.startsWith(ROW_KEY_PREFIX)) return null
+      const id = key.slice(ROW_KEY_PREFIX.length)
+      return id === '' ? null : id
     }
 
     function decorateRows() {
+      if (typeof document === 'undefined') return
       const rows = document.querySelectorAll('[role="treeitem"]')
       rows.forEach((row) => {
         const id = sessionIdFromRow(row)
         if (!id) return
         // Checkboxes belong to multi-select only: a single delete (or any other
         // decorate pass outside the mode) must not plant them on every row.
-        if (!selecting) {
+        if (!state.selecting) {
           const stray = row.querySelector(':scope > .dsdel-check')
           if (stray) stray.remove()
         } else {
@@ -448,16 +378,17 @@ window.__ModuleLoader__.load({
             check.setAttribute('data-dsh-delete-session', 'check')
             row.insertBefore(check, row.firstChild)
           }
-          check.classList.toggle('dsdel-check-on', selected.has(id))
+          check.classList.toggle('dsdel-check-on', state.selected.has(id))
         }
-        row.classList.toggle('dsdel-row-pending', pendingRemoval.has(id))
+        row.classList.toggle('dsdel-row-pending', state.pending.has(id))
       })
-      if (!selecting) {
+      if (!state.selecting) {
         document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
       }
     }
 
     function scheduleDecorate() {
+      if (typeof requestAnimationFrame !== 'function') return
       if (decorateRaf !== null) return
       decorateRaf = requestAnimationFrame(() => {
         decorateRaf = null
@@ -469,39 +400,14 @@ window.__ModuleLoader__.load({
       if (!bar) return
       const count = bar.querySelector('.dsdel-bar-count')
       if (count) {
-        count.textContent = batchRunning
-          ? t('batchRunning')(batchDone + batchFailed, batchTotal)
-          : t('selectedCount')(selected.size)
+        count.textContent = state.batch
+          ? t('batchRunning', state.batch.done + state.batch.failed, state.batch.total)
+          : t('selectedCount', state.selected.size)
       }
       const cancel = bar.querySelector('.dsdel-bar-btn:not(.dsdel-bar-danger)')
       const del = bar.querySelector('.dsdel-bar-danger')
-      if (cancel) cancel.disabled = batchRunning
-      if (del) del.disabled = batchRunning || selected.size === 0
-    }
-
-    function toggleSelect(id) {
-      if (selected.has(id)) selected.delete(id)
-      else selected.add(id)
-      scheduleDecorate()
-      updateBar()
-    }
-
-    function onSelectClickCapture(e) {
-      if (!selecting) return
-      const row = e.target && e.target.closest ? e.target.closest('[role="treeitem"]') : null
-      if (!row) return
-      const id = sessionIdFromRow(row)
-      if (!id) return
-      e.preventDefault()
-      e.stopPropagation()
-      toggleSelect(id)
-    }
-
-    function onSelectKeydown(e) {
-      if (e.key !== 'Escape') return
-      if (batchRunning) return
-      e.stopPropagation()
-      exitSelection()
+      if (cancel) cancel.disabled = state.batch !== null
+      if (del) del.disabled = state.batch !== null || state.selected.size === 0
     }
 
     function buildBar() {
@@ -527,10 +433,35 @@ window.__ModuleLoader__.load({
       return el
     }
 
+    function toggleSelect(id) {
+      if (state.selected.has(id)) state.selected.delete(id)
+      else state.selected.add(id)
+      publish()
+      updateBar()
+    }
+
+    function onSelectClickCapture(e) {
+      if (!state.selecting) return
+      const row = e.target && e.target.closest ? e.target.closest('[role="treeitem"]') : null
+      if (!row) return
+      const id = sessionIdFromRow(row)
+      if (!id) return
+      e.preventDefault()
+      e.stopPropagation()
+      toggleSelect(id)
+    }
+
+    function onSelectKeydown(e) {
+      if (e.key !== 'Escape') return
+      if (state.batch !== null) return
+      e.stopPropagation()
+      exitSelection()
+    }
+
     function enterSelection() {
-      if (selecting) return
-      selecting = true
-      selected.clear()
+      if (state.selecting) return
+      state.selecting = true
+      state.selected.clear()
       ensureStyle()
       if (!bar) bar = buildBar()
       bar.style.display = 'flex'
@@ -540,18 +471,18 @@ window.__ModuleLoader__.load({
         rowObserver = new MutationObserver(scheduleDecorate)
         rowObserver.observe(document.body, { childList: true, subtree: true })
       }
-      scheduleDecorate()
+      publish()
       updateBar()
     }
 
     function exitSelection(options) {
-      if (!selecting) return
-      selecting = false
-      selected.clear()
-      batchRunning = false
+      if (!state.selecting) return
+      state.selecting = false
+      state.selected.clear()
+      state.batch = null
       const keepPending = !!(options && options.keepPending)
       if (!keepPending) {
-        pendingRemoval.clear()
+        state.pending.clear()
         document.querySelectorAll('.dsdel-row-pending').forEach((el) => el.classList.remove('dsdel-row-pending'))
       }
       if (bar) bar.style.display = 'none'
@@ -559,13 +490,14 @@ window.__ModuleLoader__.load({
       document.removeEventListener('keydown', onSelectKeydown, true)
       if (rowObserver) { rowObserver.disconnect(); rowObserver = null }
       document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
+      publish()
     }
 
     // 成功删除后行要保持隐藏直到列表刷新落地，之后再清掉乐观状态（避免行“闪回”）。
     function settlePendingSoon() {
       setTimeout(() => {
-        pendingRemoval.clear()
-        scheduleDecorate()
+        state.pending.clear()
+        publish()
       }, 2500)
     }
 
@@ -578,16 +510,13 @@ window.__ModuleLoader__.load({
     const BATCH_CONCURRENCY = 6
 
     function runBatchDelete() {
-      if (batchRunning) return
-      const ids = [...selected]
+      if (state.batch !== null) return
+      const ids = [...state.selected]
       if (ids.length === 0) return
-      batchRunning = true
-      batchTotal = ids.length
-      batchDone = 0
-      batchFailed = 0
-      selected.clear()
-      for (const id of ids) pendingRemoval.add(id)
-      scheduleDecorate()
+      state.batch = { total: ids.length, done: 0, failed: 0 }
+      state.selected.clear()
+      for (const id of ids) state.pending.add(id)
+      publish()
       updateBar()
 
       const failedIds = []
@@ -600,13 +529,13 @@ window.__ModuleLoader__.load({
           const id = ids[index]
           try {
             await postDelete(id)
-            batchDone += 1
+            state.batch.done += 1
           } catch {
-            batchFailed += 1
+            state.batch.failed += 1
             failedIds.push(id)
-            pendingRemoval.delete(id)
+            state.pending.delete(id)
           }
-          scheduleDecorate()
+          publish()
           updateBar()
         }
       }
@@ -614,14 +543,17 @@ window.__ModuleLoader__.load({
       for (let i = 0; i < Math.min(BATCH_CONCURRENCY, ids.length); i += 1) workers.push(worker())
 
       Promise.all(workers).then(() => {
-        batchRunning = false
-        if (batchFailed === 0) {
-          toast(t('batchDone')(batchDone))
+        const failed = state.batch ? state.batch.failed : 0
+        const ok = state.batch ? state.batch.done : 0
+        state.batch = null
+        if (failed === 0) {
+          toast(t('batchDone', ok))
           exitSelection({ keepPending: true })
           settlePendingSoon()
         } else {
-          for (const id of failedIds) selected.add(id)
-          toast(t('batchPartial')(batchDone, batchFailed), true)
+          for (const id of failedIds) state.selected.add(id)
+          toast(t('batchPartial', ok, failed), true)
+          publish()
           updateBar()
         }
         refreshList()
@@ -631,136 +563,280 @@ window.__ModuleLoader__.load({
       })
     }
 
-    // --- sidebar menu injection ------------------------------------------------
+    // --- single delete ---------------------------------------------------------
 
-    const TRASH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M9 7V4h6v3"/></svg>'
-    const SELECT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="7" r="2"/><circle cx="5" cy="17" r="2"/><path d="M11 7h9"/><path d="M11 17h9"/></svg>'
-
-    // Clone a native menu row so an injected action keeps the core styling.
-    function buildMenuItem(menuEl, label, iconSvg, danger, onClick) {
-      const proto = menuEl.querySelector('[role="menuitem"]')
-      if (!proto) return null
-      const protoWrap = proto.parentElement
-      const wrap = protoWrap ? protoWrap.cloneNode(false) : document.createElement('div')
-      if (protoWrap && protoWrap.className) wrap.className = protoWrap.className
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.setAttribute('role', 'menuitem')
-      if (proto.className) button.className = proto.className
-      if (danger) button.style.color = 'var(--dsw-alias-state-error-primary,#e5484d)'
-      const icon = document.createElement('span')
-      icon.style.cssText = 'display:inline-flex;flex:none;width:16px;height:16px;align-items:center;justify-content:center'
-      icon.innerHTML = iconSvg
-      const text = document.createElement('span')
-      text.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-      text.textContent = label
-      button.appendChild(icon)
-      button.appendChild(text)
-      button.addEventListener('click', (e) => {
-        e.stopPropagation()
-        e.preventDefault()
-        closeMenu()
-        onClick(e)
-      })
-      wrap.appendChild(button)
-      return wrap
+    function deleteNow(info) {
+      state.pending.add(info.sessionId)
+      publish()
+      postDelete(info.sessionId)
+        .then(() => {
+          toast(t('done'))
+          refreshList()
+          settlePendingSoon()
+          leaveIfCurrent(info.sessionId)
+        })
+        .catch((reason) => {
+          state.pending.delete(info.sessionId)
+          publish()
+          toast(t('failed') + String((reason && reason.message) || reason), true)
+        })
     }
 
-    function augmentMenu(menuEl, info) {
-      if (menuEl.querySelector('[data-dsh-delete-session="1"]')) return
-      const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
-      if (!viewport) return
-
-      const selectWrap = buildMenuItem(menuEl, t('multiSelect'), SELECT_ICON, false, () => enterSelection())
-      const deleteWrap = buildMenuItem(menuEl, t('menu'), TRASH_ICON, true, (e) => {
-        if (skipConfirm() && !e.shiftKey) deleteNow(info)
-        else openDialog(info)
-      })
-      if (selectWrap) {
-        selectWrap.firstChild.setAttribute('data-dsh-delete-session', 'select')
-        viewport.appendChild(selectWrap)
-      }
-      if (deleteWrap) {
-        deleteWrap.firstChild.setAttribute('data-dsh-delete-session', '1')
-        viewport.appendChild(deleteWrap)
-      }
-
-      // The portalled menu measured its height before this row existed; nudge
-      // the core placement so the grown card is re-clamped on screen.
-      window.dispatchEvent(new Event('resize'))
+    function openDeleteDialog(sessionId, title) {
+      state.dialog = { sessionId, title: title || null, busy: false, error: null, skip: false }
+      publish()
     }
 
-    // --- plugin page (slot plugins.row.config) ---------------------------------
+    function closeDeleteDialog() {
+      if (state.dialog === null || state.dialog.busy) return
+      state.dialog = null
+      publish()
+    }
+
+    // The "don't ask again" flag is committed only when the user actually
+    // confirms, exactly as before - ticking the box and then cancelling must not
+    // change the preference.
+    function confirmDelete() {
+      const dialog = state.dialog
+      if (dialog === null || dialog.busy) return
+      if (dialog.skip) setSkipConfirm(true)
+      dialog.busy = true
+      dialog.error = null
+      state.pending.add(dialog.sessionId)
+      publish()
+      postDelete(dialog.sessionId)
+        .then(() => {
+          state.dialog = null
+          toast(t('done'))
+          refreshList()
+          settlePendingSoon()
+          leaveIfCurrent(dialog.sessionId)
+          publish()
+        })
+        .catch((reason) => {
+          state.pending.delete(dialog.sessionId)
+          dialog.busy = false
+          dialog.error = t('failed') + String((reason && reason.message) || reason)
+          publish()
+        })
+    }
+
+    // --- menu rows (slot: sidebar.workspaces.session.menu.item) ----------------
+
+    /** Inline glyphs for the two rows; the host exposes no matching pair. */
+    const TRASH_PATHS = ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13', 'M9 7V4h6v3']
+    const SELECT_PATHS = ['M5 7m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M5 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M11 7h9', 'M11 17h9']
+
+    function glyph(paths) {
+      return h(
+        'svg',
+        {
+          width: 16,
+          height: 16,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        },
+        paths.map((d) => h('path', { key: d, d })),
+      )
+    }
+
+    // ui-primitives' `MenuItemButton` takes a real `danger` parameter (verified
+    // against the shipped component), which puts the host's own danger class on
+    // the button. Passing it is what keeps the delete row in the host's danger
+    // colour - icon included - rather than a plugin guess.
+    //
+    // No `separatorBefore`: this migration moves the rows onto the host's slot
+    // contract and must not change how the menu looks.
+
+    /** "Select multiple" row (order 409, directly above the delete row). */
+    function SelectMultipleMenuItem({ useMenuOpenState, t: translate }) {
+      const [, setMenuOpen] = useMenuOpenState()
+      return h(primitives.MenuItemButton, {
+        icon: glyph(SELECT_PATHS),
+        onSelect: () => {
+          setMenuOpen(false)
+          enterSelection()
+        },
+        children: translate('multiSelect'),
+      })
+    }
+
+    /** "Delete session" row (order 410, in the host's danger colour). */
+    function DeleteSessionMenuItem({ sessionId, displayTitle, useMenuOpenState, t: translate }) {
+      const [, setMenuOpen] = useMenuOpenState()
+      return h(primitives.MenuItemButton, {
+        danger: true,
+        icon: glyph(TRASH_PATHS),
+        onSelect: (event) => {
+          setMenuOpen(false)
+          // Shift-click always asks, even after "don't ask again" was ticked.
+          if (skipConfirm() && !(event && event.shiftKey)) deleteNow({ sessionId })
+          else openDeleteDialog(sessionId, displayTitle)
+        },
+        children: translate('menu'),
+      })
+    }
+
+    // --- confirmation dialog (slot: shell.overlay) -----------------------------
+
+    function DeleteSessionDialog({ t: translate }) {
+      const view = useSnapshot()
+      const dialog = view.dialog
+      if (dialog === null) return null
+
+      const footer = h(
+        Fragment,
+        null,
+        h(primitives.Button, {
+          variant: 'outline',
+          disabled: dialog.busy,
+          onClick: () => closeDeleteDialog(),
+          children: translate('cancel'),
+        }),
+        h(primitives.Button, {
+          variant: 'outline',
+          className: 'dsdel-danger-btn',
+          disabled: dialog.busy,
+          onClick: () => confirmDelete(),
+          children: dialog.busy ? translate('deleting') : translate('confirm'),
+        }),
+      )
+
+      return h(primitives.Modal, {
+        open: true,
+        onClose: () => closeDeleteDialog(),
+        closeLabel: translate('cancel'),
+        title: translate('title'),
+        footer,
+        children: [
+          h('p', { key: 'meta', className: 'dsdel-modal-meta' },
+            `${dialog.title || translate('untitled')} · ${dialog.sessionId}`),
+          h('p', { key: 'desc', className: 'dsdel-modal-text' }, translate('desc')),
+          h('label', {
+            key: 'skip',
+            className: 'dsdel-modal-text',
+            style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', cursor: 'pointer' },
+          },
+            h('input', {
+              type: 'checkbox',
+              onChange: (e) => { dialog.skip = !!(e && e.target && e.target.checked) },
+            }),
+            translate('dontAsk'),
+          ),
+          dialog.error !== null
+            ? h('p', { key: 'error', className: 'dsdel-modal-error', role: 'alert' }, dialog.error)
+            : null,
+        ],
+      })
+    }
+
+    // --- plugin page card (slot: plugins.row.config) ---------------------------
 
     // The manager's detail page for this bundle gives the component row a
     // configure arrow once the bundle registers its own row.config entry (key
     // `<bundle package>#<row id>`). The card carries the one setting the dialog
     // also exposes: whether a session delete asks first.
-    function AskBeforeDeleteOption({ view }) {
+    function AskBeforeDeleteOption({ view, t: injected }) {
+      // Unlike the menu rows and the dialog, this entry is registered without a
+      // `locale`, so the host injects no `t` here. Falling back to the
+      // module-level translator (same dictionaries) keeps the card working
+      // instead of throwing on an undefined call.
+      const translate = typeof injected === 'function' ? injected : t
       const [ask, setAsk] = react.useState(!skipConfirm())
       react.useEffect(() => subscribeSkip(() => setAsk(!skipConfirm())), [])
-      if (view === 'summary') return t(ask ? 'pageSummaryAsk' : 'pageSummaryAuto')
-      return react.createElement(
-        'div',
-        { className: 'dsdel-page' },
-        react.createElement(primitives.Checkbox, {
+      if (view === 'summary') return translate(ask ? 'pageSummaryAsk' : 'pageSummaryAuto')
+      return h('div', { className: 'dsdel-page' },
+        h(primitives.Checkbox, {
           checked: ask,
-          label: t('pageAsk'),
+          label: translate('pageAsk'),
           onChange: (checked) => {
             setAsk(checked === true)
             setSkipConfirm(checked !== true)
           },
         }),
-        react.createElement('p', { className: 'dsdel-page-hint' }, t(ask ? 'pageHintAsk' : 'pageHintAuto')),
+        h('p', { className: 'dsdel-page-hint' }, translate(ask ? 'pageHintAsk' : 'pageHintAuto')),
       )
     }
 
-    function installSettings(slots) {
-      slots.inject('plugins.row.config', () =>
-        slots.register(
-          { name: 'plugins.row.config', key: 'dsh-delete-session#dsh-delete-session' },
-          AskBeforeDeleteOption,
-        ),
-      )
-    }
-
-    function install() {
-      if (typeof document === 'undefined' || !document.body) return null
-      ensureStyle()
-      const seen = new WeakSet()
-      const scan = () => {
-        const menus = document.querySelectorAll('body > [role="menu"]')
-        menus.forEach((menuEl) => {
-          if (seen.has(menuEl)) return
-          let info = null
-          try { info = sessionInfoFromMenu(menuEl) } catch { /* ignore */ }
-          if (!info) return
-          seen.add(menuEl)
-          try { augmentMenu(menuEl, info) } catch { /* best-effort DOM shim */ }
-        })
-      }
-      scan()
-      const observer = new MutationObserver(scan)
-      observer.observe(document.body, { childList: true, subtree: false })
-      return () => observer.disconnect()
-    }
+    // --- plugin ------------------------------------------------------------------
 
     function apply(ctx) {
+      ensureStyle()
+
       sessionsSvc = ctx.get('sessions') || null
       if (!sessionsSvc) {
         try { ctx.inject(['sessions'], (sub) => { sessionsSvc = sub.sessions }) } catch { /* optional */ }
       }
       localeSvc = ctx.get('locale') || null
-      if (!localeSvc) {
-        try { ctx.inject(['locale'], (sub) => { localeSvc = sub.locale }) } catch { /* optional */ }
+
+      // Slot components are handed a `t` bound to this namespace, so the
+      // dictionaries must reach the host - on BOTH arrival paths. If `locale`
+      // only turns up through `ctx.inject`, a registration living on the
+      // synchronous branch would never run and the menu would fall back to
+      // printing raw keys ("multiSelect", "menu"). `ctx.effect` ties the
+      // registration's lifetime to the plugin, matching ui-workspace.
+      let localeRegistered = false
+      const adoptLocale = (svc) => {
+        localeSvc = svc || null
+        if (localeRegistered || !localeSvc || typeof localeSvc.register !== 'function') return
+        localeRegistered = true
+        const register = () => localeSvc.register(NS, { zh, en })
+        try {
+          if (typeof ctx.effect === 'function') ctx.effect(register, `${NS}: dictionaries`)
+          else register()
+        } catch { /* already registered */ }
       }
-      const slots = ctx.get('slots')
-      if (slots) installSettings(slots)
+      if (localeSvc) adoptLocale(localeSvc)
       else {
-        try { ctx.inject(['slots'], (sub) => installSettings(sub.slots)) } catch { /* optional */ }
+        try { ctx.inject(['locale'], (sub) => adoptLocale(sub.locale)) } catch { /* optional */ }
       }
-      const dispose = install()
-      if (dispose) ctx.effect(() => dispose)
+
+      const install = (slots) => {
+        // Session menu rows. A package-namespaced id keeps them beside the
+        // shipped pin(100)/rename(200)/fork(300)/archive(400)/session-id(450).
+        slots.inject('sidebar.workspaces.session.menu.item', () => slots.register(
+          { name: 'sidebar.workspaces.session.menu.item', id: `${NS}-multi`, order: 409, locale: NS },
+          SelectMultipleMenuItem,
+        ))
+        slots.inject('sidebar.workspaces.session.menu.item', () => slots.register(
+          { name: 'sidebar.workspaces.session.menu.item', id: NS, order: 410, locale: NS },
+          DeleteSessionMenuItem,
+        ))
+        // The confirmation dialog rides the frame-wide overlay seat.
+        slots.inject('shell.overlay', () => slots.register(
+          { name: 'shell.overlay', id: `${NS}-dialog`, locale: NS },
+          DeleteSessionDialog,
+        ))
+        // The plugin page card.
+        slots.inject('plugins.row.config', () => slots.register(
+          { name: 'plugins.row.config', key: `${NS}#${NS}` },
+          AskBeforeDeleteOption,
+        ))
+
+        // The batch bar and its row observer are the only long-lived DOM state;
+        // drop them when the plugin unloads.
+        return () => {
+          exitSelection()
+          if (bar) { bar.remove(); bar = null }
+        }
+      }
+
+      const slots = ctx.get('slots')
+      if (slots) {
+        const dispose = install(slots)
+        ctx.effect(() => dispose)
+      } else {
+        try {
+          ctx.inject(['slots'], (sub) => {
+            const dispose = install(sub.slots)
+            ctx.effect(() => dispose)
+          })
+        } catch { /* no slot surface on this profile */ }
+      }
     }
 
     return { apply }
