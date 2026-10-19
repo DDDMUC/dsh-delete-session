@@ -37,11 +37,11 @@ window.__ModuleLoader__.load({
       menu: '删除会话',
       multiSelect: '多选',
       title: '删除会话',
-      desc: '将把该会话及其全部对话记录（会话日志、工作区记账与统计）从列表中移除，并放进系统回收站。',
+      descRecycle: '将把该会话及其全部对话记录（会话日志、工作区记账与统计）从列表中移除，并放进系统回收站。',
+      descPermanent: '将永久删除该会话及其全部对话记录（会话日志、工作区记账与统计），此操作不可恢复。',
       cancel: '取消',
       confirm: '删除',
       deleting: '删除中…',
-      dontAsk: '不再询问，以后直接删除',
       done: '已删除会话',
       failed: '删除失败：',
       busy: '该会话正被 DSH 打开，删除未能完成；请稍后重试（通常几秒后即可），或重启 DSH 后再试。',
@@ -59,6 +59,9 @@ window.__ModuleLoader__.load({
       batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
       batchFailed: '批量删除失败：',
       pageAsk: '删除时询问',
+      pageRecycle: '删除至回收站',
+      pageRecycleOn: '删除后放进系统回收站，可以还原。',
+      pageRecycleOff: '删除后直接从硬盘移除，不可恢复。',
       pageHintAsk: '每次删除会话前都会弹出确认框。',
       pageHintAuto: '删除会话会直接执行，不再询问。',
       // The produced-file list only exists inside the dialog, so ask mode keeps a
@@ -122,11 +125,11 @@ window.__ModuleLoader__.load({
       menu: 'Delete session',
       multiSelect: 'Select multiple',
       title: 'Delete session',
-      desc: 'This removes the session and all of its conversation records (log, workspace accounting and statistics) from the list and puts them in the system trash.',
+      descRecycle: 'This removes the session and all of its conversation records (log, workspace accounting and statistics) from the list and puts them in the system trash.',
+      descPermanent: 'This permanently deletes the session and all of its conversation records (log, workspace accounting and statistics). This cannot be undone.',
       cancel: 'Cancel',
       confirm: 'Delete',
       deleting: 'Deleting...',
-      dontAsk: "Don't ask again",
       done: 'Session deleted',
       failed: 'Delete failed: ',
       busy: 'This session is currently open in DSH; the delete did not complete. Try again in a moment (usually a few seconds), or restart DSH and retry.',
@@ -144,6 +147,9 @@ window.__ModuleLoader__.load({
       batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
       batchFailed: 'Batch delete failed: ',
       pageAsk: 'Ask before deleting',
+      pageRecycle: 'Delete to the Recycle Bin',
+      pageRecycleOn: 'The session goes to the system trash and can be restored.',
+      pageRecycleOff: 'The session is removed from the disk right away and cannot be restored.',
       pageHintAsk: 'Show a confirmation dialog before every session delete.',
       pageHintAuto: 'Delete the session right away without asking.',
       pageHintAutoWithArtifacts: 'A delete still opens a dialog, because the produced-file list has to be shown first.',
@@ -358,6 +364,8 @@ window.__ModuleLoader__.load({
     const ROOT_KEY = 'dsh-delete-session:quarantine-root'
     /** Skip files inside a git working tree when quarantining. */
     const SKIP_GIT_KEY = 'dsh-delete-session:skip-git'
+    /** Whether a delete goes to the system trash instead of vanishing. */
+    const RECYCLE_KEY = 'dsh-delete-session:recycle'
     /** How many artifact rows the dialog lists before collapsing the rest. */
     const ARTIFACT_ROWS_SHOWN = 40
     const prefListeners = new Set()
@@ -427,6 +435,18 @@ window.__ModuleLoader__.load({
 
     function setSkipGitRepos(skip) {
       writePref(SKIP_GIT_KEY, skip ? null : '0')
+    }
+
+    /**
+     * Send the session to the system trash rather than removing it outright.
+     * On by default: a wrong click should be undoable unless the user said otherwise.
+     */
+    function recycleSession() {
+      return readPref(RECYCLE_KEY, '1') === '1'
+    }
+
+    function setRecycleSession(on) {
+      writePref(RECYCLE_KEY, on ? null : '0')
     }
 
     /** The chosen quarantine root, or '' for "use the host default". */
@@ -519,6 +539,9 @@ window.__ModuleLoader__.load({
       const root = quarantineRoot()
       const payload = quarantine === undefined ? { sessionId } : { sessionId, quarantine }
       if (root !== '') payload.root = root
+      // Whether the files go to the system trash is a per-delete choice, so it
+      // travels with the request rather than being read from the host config.
+      payload.recycle = recycleSession()
       return fetch('/dsh-delete-session/delete', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1197,7 +1220,6 @@ window.__ModuleLoader__.load({
     function confirmDelete() {
       const dialog = state.dialog
       if (dialog === null || dialog.busy) return
-      if (dialog.skip) setSkipConfirm(true)
       const quarantine = quarantineRequest(dialog)
       dialog.busy = true
       dialog.error = null
@@ -1485,19 +1507,13 @@ window.__ModuleLoader__.load({
         children: [
           h('p', { key: 'meta', className: 'dsdel-modal-meta' },
             `${dialog.title || translate('untitled')} · ${dialog.sessionId}`),
-          h('p', { key: 'desc', className: 'dsdel-modal-text' }, translate('desc')),
+          // The sentence has to match the switch: one promises the Recycle Bin,
+          // the other promises exactly what an unchecked box means.
+          h('p', { key: 'desc', className: 'dsdel-modal-text' },
+            translate(recycleSession() ? 'descRecycle' : 'descPermanent')),
           renderArtifacts(dialog.artifacts, translate),
-          h('label', {
-            key: 'skip',
-            className: 'dsdel-modal-text',
-            style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', cursor: 'pointer' },
-          },
-            h('input', {
-              type: 'checkbox',
-              onChange: (e) => { dialog.skip = !!(e && e.target && e.target.checked) },
-            }),
-            translate('dontAsk'),
-          ),
+          // Whether a delete asks first is a setting, not a dialog affordance:
+          // it lives on the plugin page only, so this dialog never changes it.
           dialog.error !== null
             ? h('p', { key: 'error', className: 'dsdel-modal-error', role: 'alert' }, dialog.error)
             : null,
@@ -1523,6 +1539,7 @@ window.__ModuleLoader__.load({
       // The host owns the default path, so it is fetched once per mount.
       const defaultRootValue = () => (pageSnapshot && pageSnapshot.defaultRoot) || ''
       const [ask, setAsk] = react.useState(!skipConfirm())
+      const [recycle, setRecycle] = react.useState(recycleSession())
       const [off, setOff] = react.useState(artifactsOff())
       const [auto, setAuto] = react.useState(artifactsAuto())
       const [scope, setScope] = react.useState(artifactScope())
@@ -1556,6 +1573,18 @@ window.__ModuleLoader__.load({
           // Ask mode needs the dialog for its file list, so "delete straight away"
           // would be a promise this combination does not keep.
           translate(ask ? 'pageHintAsk' : (!off && !auto ? 'pageHintAutoWithArtifacts' : 'pageHintAuto'))),
+
+        h(primitives.Checkbox, {
+          key: 'recycle',
+          checked: recycle,
+          label: translate('pageRecycle'),
+          onChange: (checked) => {
+            setRecycle(checked === true)
+            setRecycleSession(checked === true)
+          },
+        }),
+        h('p', { key: 'recycleHint', className: 'dsdel-page-hint' },
+          translate(recycle ? 'pageRecycleOn' : 'pageRecycleOff')),
 
         h(primitives.Checkbox, {
           key: 'off',

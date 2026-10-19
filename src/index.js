@@ -147,6 +147,61 @@ async function ensureRecycleExe() {
   }
   return null
 }
+
+/**
+ * The command that hands paths to the platform trash.
+ *
+ * Windows is done in-process (see `sendToRecycleBin`); macOS has no trash command
+ * of its own, so Finder performs the delete, and Linux delegates to `gio trash`,
+ * which ships with GLib on every mainstream desktop. Kept separate from running
+ * it so the shape can be tested on a machine that has neither.
+ */
+/**
+ * Compile the helper executables while nothing is waiting for them. The first
+ * pick or delete otherwise pays for `csc` (0.5-1.7 s); by the time the user
+ * clicks, the cache is already there.
+ *
+ * Deliberately fire-and-forget and never fatal: a machine without `csc` keeps
+ * the PowerShell fallbacks, and a failure here must not stop the plugin loading.
+ */
+function warmCompiledHelpers() {
+  if (process.platform !== 'win32') return
+  const warm = async () => {
+    try { await ensurePickerExe() } catch { /* the fallback covers it */ }
+    try { await ensureRecycleExe() } catch { /* the fallback covers it */ }
+  }
+  void warm()
+}
+function trashCommandFor(platform, targets) {
+  if (platform === 'darwin') {
+    // One -e per path: AppleScript has no list form for this, and a failure on one
+    // path must not stop the rest.
+    return {
+      program: 'osascript',
+      args: targets.flatMap((target) => [
+        '-e',
+        `tell application "Finder" to delete (POSIX file "${target.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")`,
+      ]),
+    }
+  }
+  return { program: 'gio', args: ['trash', ...targets] }
+}
+
+/**
+ * Run the platform trash command. Returns false when the command is missing
+ * (`gio` on a bare container, a denied Finder automation prompt) so the caller
+ * keeps the staged copy instead of pretending the delete happened.
+ */
+async function trashWithSystem(targets, platform) {
+  const command = trashCommandFor(platform, targets)
+  try {
+    const run = await runExecutable(command.program, command.args, RECYCLE_TIMEOUT_MS)
+    return run.code === 0
+  } catch {
+    return false
+  }
+}
+
 /**
  * Send paths to the Windows Recycle Bin.
  *
@@ -161,7 +216,8 @@ async function ensureRecycleExe() {
  */
 async function sendToRecycleBin(targets) {
   if (targets.length === 0) return true
-  if (process.platform !== 'win32') return false
+  // macOS and Linux have their own trash; Windows is handled below in-process.
+  if (process.platform !== 'win32') return trashWithSystem(targets, process.platform)
 
   // The compiled helper answers in ~100 ms where one PowerShell start costs the
   // better part of a second, and it takes every path of a delete at once.
@@ -288,6 +344,35 @@ async function retirePaths(targets) {
   return staged.moved
 }
 
+/**
+ * Remove paths outright. This is the branch behind the unchecked Recycle Bin
+ * switch: the dialog says the delete is permanent in that state, so the files
+ * must not linger anywhere. Every other path through this plugin retires to the
+ * bin, and that difference is the whole point of the switch.
+ *
+ * @returns the paths that are gone afterwards.
+ */
+function removeForever(targets) {
+  const gone = []
+  for (const target of targets) {
+    if (!fs.existsSync(target)) continue
+    try {
+      fs.rmSync(target, { recursive: true, force: true })
+      if (!fs.existsSync(target)) gone.push(target)
+    } catch {
+      // reported by the caller's own existence checks
+    }
+  }
+  return gone
+}
+/**
+ * Retire a list according to the switch: into the system trash (staged first,
+ * then the shell takes it) or off the disk. Kept separate from the delete so the
+ * choice itself can be tested without standing up a whole session.
+ */
+async function retireTargets(targets, recycle) {
+  return recycle ? retirePaths(targets) : removeForever(targets)
+}
 async function retireSessionDirs(sessionId) {
   return retirePaths(findSessionDirs(sessionId))
 }
@@ -512,26 +597,29 @@ async function detachFromWorkspace(ctx, sessionId) {
 
 // --- core delete -------------------------------------------------------------
 
-async function deleteSession(ctx, sessionId) {
+async function deleteSession(ctx, sessionId, options) {
   if (!SESSION_ID_RE.test(sessionId)) {
     throw new HttpError(400, 'invalid', 'invalid session id')
   }
+  // Undoable by default: only an explicit `recycle: false` sends the files to a
+  // plain removal instead of the system trash.
+  const recycle = options === undefined || options === null || options.recycle !== false
   const stopped = await quiesceAgent(ctx, sessionId)
   const { flushed, detached } = await flushAndDetach(ctx, sessionId)
   await assertNoActiveWriter(ctx, sessionId)
 
-  // Retire the on-disk directories first. They go to the Recycle Bin, so a
-  // wrong click is undoable in Explorer; only a platform without one falls back
-  // to the local trash directory. If the filesystem refuses, fail before
-  // touching workspace accounting so a half-deleted session cannot fall out of
-  // its group into "Ungrouped".
-  // One helper process for the whole job: the session directories and its cache
-  // rows are retired together. Each start costs ~100 ms, and the second directory
-  // pass is free when the drain recreated nothing — which is the normal case.
+  // Retire the on-disk directories first, then the cache rows. With the Recycle
+  // Bin switch on (the default) they are staged and the shell moves them to the
+  // bin in the background; switched off, they are removed outright — that is what
+  // the dialog promises in that state.
+  //
+  // The second directory pass costs nothing when the drain recreated nothing,
+  // which is the normal case.
   const cacheFiles = findSessionCaches(sessionId)
-  let removed = await retirePaths([...findSessionDirs(sessionId), ...cacheFiles])
+  const targets = [...findSessionDirs(sessionId), ...cacheFiles]
+  let removed = await retireTargets(targets, recycle)
   await new Promise((resolve) => setImmediate(resolve))
-  removed = removed.concat(await retireSessionDirs(sessionId))
+  removed = removed.concat(await retireTargets(findSessionDirs(sessionId), recycle))
 
   const sp = ctx.get('sessionPersistence')
   if (sp && typeof sp.stat === 'function') {
@@ -1642,6 +1730,8 @@ function guard(req, res) {
 // --- plugin ------------------------------------------------------------------
 
 export function apply(ctx) {
+  warmCompiledHelpers()
+
   const registerRoutes = (webServer, fiber) => {
     // Read-only scan: the dialog shows what a delete would move, before it does.
     fiber.effect(() => webServer.register({
@@ -1817,7 +1907,7 @@ export function apply(ctx) {
             ? await planArtifacts(ctx, sessionId, undefined, { skipGit: body.quarantine.skipGit === true })
             : null
           const quarantine = await runQuarantine(ctx, sessionId, body.quarantine, plan)
-          const result = await deleteSession(ctx, sessionId)
+          const result = await deleteSession(ctx, sessionId, { recycle: body.recycle !== false })
           sendJson(res, 200, quarantine === null ? { ok: true, ...result } : { ok: true, ...result, quarantine })
         } catch (error) {
           const status = error instanceof HttpError ? error.status : 500
@@ -1862,7 +1952,7 @@ export function apply(ctx) {
         // deletions of the same storage.
         const results = await runWithConcurrency(sessionIds, BATCH_CONCURRENCY, async (sessionId) => {
           try {
-            const result = await deleteSession(ctx, sessionId)
+            const result = await deleteSession(ctx, sessionId, { recycle: body.recycle !== false })
             return { sessionId, ok: true, removed: result.removed }
           } catch (error) {
             return {
@@ -1906,8 +1996,12 @@ export const internals = {
   planArtifacts,
   quarantineFiles,
   resolveQuarantineRoot,
+  removeForever,
   retirePaths,
+  retireTargets,
   runQuarantine,
   sendToRecycleBin,
   toolTarget,
+  trashCommandFor,
+  warmCompiledHelpers,
 }

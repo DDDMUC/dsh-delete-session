@@ -906,10 +906,14 @@ const collectChecks = (nodes, harness, out = []) => {
 }
 const pageChecks = (harness) => collectChecks(pageCard(harness).props.children, harness)
 const pageCheckbox = (harness) => pageChecks(harness)[0]
-const offCheckbox = (harness) => pageChecks(harness)[1]
-const autoCheckbox = (harness) => pageChecks(harness)[2]
-const scopeCreatedCheckbox = (harness) => pageChecks(harness)[3]
-const scopeAllCheckbox = (harness) => pageChecks(harness)[4]
+// Selected by their key, not by position: adding a switch to the card must not
+// silently retarget these assertions at a different control.
+const pageCheck = (harness, key) => findByKey(pageCard(harness).props.children, key)[0]
+const offCheckbox = (harness) => pageCheck(harness, 'off')
+const recycleCheckbox = (harness) => pageCheck(harness, 'recycle')
+const autoCheckbox = (harness) => pageCheck(harness, 'auto')
+const scopeCreatedCheckbox = (harness) => pageCheck(harness, 'scopeCreated')
+const scopeAllCheckbox = (harness) => pageCheck(harness, 'scopeAll')
 
 /** The body the delete route received, or null when it was never called. */
 const deleteBody = (harness) => {
@@ -959,38 +963,25 @@ test('the page checkbox starts ticked and unticking it deletes without a dialog'
   )
 })
 
-test("the dialog's don't-ask-again flips the page checkbox off", async () => {
-  const harness = await loadPlugin()
-  mountRow(harness, SESSION_A)
-  assert.equal(pageCheckbox(harness).props.checked, true)
+test(
+  'the dialog offers no way to change whether a delete asks',
+  async () => {
+    // The switch lives on the plugin page only. A dialog that could flip it
+    // would let one click silently change every later delete.
+    const harness = await loadPlugin()
+    mountRow(harness, SESSION_A)
 
-  const { element } = deleteRow(harness, SESSION_A)
-  element.props.onSelect({ shiftKey: false })
-  const parts = dialogParts(harness)
-  parts.skip.props.onChange({ target: { checked: true } })
-  parts.confirm.props.onClick()
-  await tick()
+    const { element } = deleteRow(harness, SESSION_A)
+    element.props.onSelect({ shiftKey: false })
 
-  assert.equal(localStorage.getItem(SKIP_KEY), '1', 'the dialog stored the opt-out')
-  assert.equal(pageCheckbox(harness).props.checked, false, 'the page checkbox reflects it')
-})
-
-test('ticking don\'t-ask-again and then cancelling changes nothing', async () => {
-  const harness = await loadPlugin()
-  mountRow(harness, SESSION_A)
-
-  const { element } = deleteRow(harness, SESSION_A)
-  element.props.onSelect({ shiftKey: false })
-  const parts = dialogParts(harness)
-  parts.skip.props.onChange({ target: { checked: true } })
-  parts.cancel.props.onClick()
-  await tick()
-
-  assert.equal(localStorage.getItem(SKIP_KEY), null, 'the preference was never committed')
-  assert.equal(dialogElement(harness), null, 'the dialog closed')
-  assert.equal(harness.requests.length, 0, 'and nothing was deleted')
-})
-
+    assert.equal(dialogParts(harness).skip, null, "the dialog carries no don't-ask-again control")
+    assert.equal(
+      pageCheckbox(harness).props.checked,
+      true,
+      'and the page remains the only place the setting is read from',
+    )
+  },
+)
 // --- produced files: the opt-in feature -------------------------------------
 
 const PLAN = {
@@ -1056,7 +1047,7 @@ test('the produced-files feature ships off: no scan, no section, no quarantine f
 
 test('the page hides the artifact sub-controls while the master switch is on', async () => {
   const harness = await loadPlugin()
-  assert.equal(pageChecks(harness).length, 2, 'only the ask toggle and the master switch render')
+  assert.equal(pageChecks(harness).length, 3, 'ask, recycle and the master switch render')
   assert.equal(offCheckbox(harness).props.checked, true, 'the master switch starts ticked')
 })
 
@@ -1065,7 +1056,7 @@ test('clearing the master switch reveals the auto and scope controls', async () 
   offCheckbox(harness).props.onChange(false)
 
   assert.equal(localStorage.getItem(OFF_KEY), '0', 'the opt-in was stored')
-  assert.equal(pageChecks(harness).length, 6, 'the sub-controls render once enabled')
+  assert.equal(pageChecks(harness).length, 7, 'the sub-controls render once enabled')
   assert.equal(autoCheckbox(harness).props.checked, false, 'asking is the default once enabled')
   assert.equal(scopeCreatedCheckbox(harness).props.checked, true, 'created-only is the default scope')
   assert.equal(scopeAllCheckbox(harness).props.checked, false)
@@ -1808,4 +1799,46 @@ test('the scan itself is told whether to skip git files', async () => {
   await flush()
 
   assert.equal(artifactsBody(harness).skipGit, true, 'the scan carries the flag')
+})
+
+// --- the recycle-bin switch -------------------------------------------------
+
+const RECYCLE_KEY = 'dsh-delete-session:recycle'
+
+test('deleting to the system trash is on by default', async () => {
+  const harness = await loadPlugin()
+  const box = recycleCheckbox(harness)
+  assert.ok(box, 'the switch renders with the delete controls')
+  assert.equal(box.props.checked, true, 'a wrong click stays undoable until told otherwise')
+  assert.equal(box.props.label, '删除至回收站')
+})
+
+test('the default sentence promises the Recycle Bin', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+
+  const desc = dialogParts(harness).desc
+  assert.match(desc, /回收站/)
+  assert.doesNotMatch(desc, /永久删除|不可恢复/)
+})
+
+test('unchecking it switches both the sentence and the request to a hard delete', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  recycleCheckbox(harness).props.onChange(false)
+  assert.equal(localStorage.getItem(RECYCLE_KEY), '0', 'the choice is remembered')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+
+  const desc = dialogParts(harness).desc
+  assert.match(desc, /永久删除/, 'the sentence now says what an unchecked box means')
+  assert.doesNotMatch(desc, /回收站/, 'and no longer promises a recoverable delete')
+
+  dialogParts(harness).confirm.props.onClick()
+  await flush()
+  assert.equal(deleteBody(harness).recycle, false, 'the host is told to remove it outright')
 })

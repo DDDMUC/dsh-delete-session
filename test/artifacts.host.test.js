@@ -867,3 +867,87 @@ test('a .git file (worktree or submodule) counts as a repository too', async () 
   const { allowed } = await internals.classifyPaths(rows, root, HOME_ROOT, { skipGit: true })
   assert.equal(allowed.length, 0, 'the worktree file is skipped')
 })
+
+// --- the system trash on macOS and Linux ------------------------------------
+
+test('macOS deletes through Finder, one AppleScript statement per path', () => {
+  const command = internals.trashCommandFor('darwin', ['/Users/x/session-a', '/Users/x/session-b'])
+
+  assert.equal(command.program, 'osascript')
+  assert.equal(command.args.length, 4, 'two -e flags, one statement each')
+  assert.equal(command.args[0], '-e')
+  assert.equal(command.args[2], '-e')
+  assert.match(command.args[1], /^tell application "Finder" to delete \(POSIX file "/)
+  assert.match(command.args[1], /session-a"\)$/)
+})
+
+test('the AppleScript literal escapes the path it is given', () => {
+  // An unescaped quote would end the string early and turn the path into code.
+  const command = internals.trashCommandFor('darwin', ['C:\\tmp\\a"b'])
+  const script = command.args[1]
+
+  assert.ok(script.includes('C:\\\\tmp'), 'backslashes are doubled for AppleScript')
+  assert.ok(script.includes('\\"b'), 'double quotes are escaped')
+  assert.ok(script.endsWith('")'), 'the statement still closes')
+})
+
+test('Linux delegates to gio trash with every path as one argument', () => {
+  const command = internals.trashCommandFor('linux', ['/home/x/session-a', '/home/x/session-a.json'])
+
+  assert.equal(command.program, 'gio')
+  assert.deepEqual(command.args, ['trash', '/home/x/session-a', '/home/x/session-a.json'])
+  assert.equal(command.args.slice(1).length, 2, 'no shell, so a path cannot become an option list')
+})
+
+test('no paths means nothing to ask the platform for', async () => {
+  assert.equal(await internals.sendToRecycleBin([]), true, 'an empty retire still reports success')
+})
+
+test('warming the compiled helpers never throws before anything is cached', () => {
+  // Fire-and-forget: a synchronous throw here would abort plugin loading.
+  assert.doesNotThrow(() => internals.warmCompiledHelpers())
+})
+
+// --- permanent delete is an explicit choice, not the default ---------------
+
+test('removeForever takes the path off the disk and stages nothing', () => {
+  const dir = path.join(scratch('forever'), 'session-gone')
+  fs.mkdirSync(path.join(dir, 'nested'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'nested', 'log'), 'x')
+  const before = fs.readdirSync(HOME_ROOT).filter((name) => name.startsWith('session-trash-')).length
+
+  const gone = internals.removeForever([dir])
+
+  assert.deepEqual(gone, [dir], 'the path is reported as removed')
+  assert.equal(fs.existsSync(dir), false, 'it is no longer on disk')
+  const after = fs.readdirSync(HOME_ROOT).filter((name) => name.startsWith('session-trash-')).length
+  assert.equal(after, before, 'a permanent delete leaves no staging copy behind')
+})
+
+test('removeForever reports only what actually went away', () => {
+  const missing = path.join(scratch('forever2'), 'never-existed')
+  const gone = internals.removeForever([missing])
+  assert.deepEqual(gone, [], 'a path that was never there is not claimed as deleted')
+})
+
+test('the switch decides between staging for the bin and removing outright', async () => {
+  const root = scratch('switch')
+
+  const kept = path.join(root, 'recycled', 'session-keep')
+  fs.mkdirSync(kept, { recursive: true })
+  fs.writeFileSync(path.join(kept, 'log'), 'x')
+  const stagedBefore = fs.readdirSync(HOME_ROOT).filter((n) => n.startsWith('session-trash-')).length
+  await internals.retireTargets([kept], true)
+  assert.equal(fs.existsSync(kept), false, 'the path left its original location')
+  const stagedAfter = fs.readdirSync(HOME_ROOT).filter((n) => n.startsWith('session-trash-')).length
+  assert.equal(stagedAfter, stagedBefore + 1, 'recycling stages a copy the shell can pick up')
+
+  const gone = path.join(root, 'removed', 'session-gone')
+  fs.mkdirSync(gone, { recursive: true })
+  fs.writeFileSync(path.join(gone, 'log'), 'x')
+  const stagedBeforePermanent = fs.readdirSync(HOME_ROOT).filter((n) => n.startsWith('session-trash-')).length
+  await internals.retireTargets([gone], false)
+  assert.equal(fs.existsSync(gone), false, 'the path is gone')
+  const stagedAfterPermanent = fs.readdirSync(HOME_ROOT).filter((n) => n.startsWith('session-trash-')).length
+  assert.equal(stagedAfterPermanent, stagedBeforePermanent, 'a permanent delete stages nothing')
+})
