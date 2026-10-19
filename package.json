@@ -1,7 +1,7 @@
 {
   "name": "dsh-delete-session",
-  "version": "0.2.0",
-  "description": "Delete sessions from the DSH Web sidebar: adds a Delete action to the session row menu with a risk-consent dialog, then removes the session log, workspace accounting and live session state.",
+  "version": "0.4.0",
+  "description": "Delete sessions from the DSH Web sidebar: adds a Delete action to the session row menu with a risk-consent dialog, then removes the session log, workspace accounting and live session state — and, when opted in, moves the files the conversation produced into a quarantine folder.",
   "type": "module",
   "main": "src/index.js",
   "exports": {

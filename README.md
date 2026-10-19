@@ -29,6 +29,7 @@ DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只
 - **确认一次后可跳过** —— 对话框里勾选「不再询问，以后直接删除」，之后点菜单项直接删除（左下角 toast 提示）；**按住 Shift 点击**可临时恢复弹窗；清除 `localStorage['dsh-delete-session:skip-confirm']` 可永久恢复
 - **多选批量删除** —— 会话菜单里的「多选」进入选择模式：每行左侧出现勾选圈，点整行即勾选（不会打开会话），底部操作条显示「已选 N 个 / 取消 / 删除」；点删除**立即批量执行**（无确认弹窗、无全选、所有行都可选）：被选中的行**乐观隐藏**、操作条实时显示「正在删除 x/N…」、客户端以 6 路并发请求宿主（不同会话并行、工作区记账串行），完成后 toast 汇总并刷新列表；失败的行立即恢复显示并保持选中，方便直接重试；Esc 或「取消」退出
 - **真正的删除** —— 停止运行中的 agent（cancel + 等待空闲）→ flush / detach 活跃会话 → 删除磁盘会话目录（原始 ID 与 `session-` 前缀两种写法）→ 持久化服务复核 → 清理工作区记账，侧栏不会残留「未分组」孤儿，并连带清理项目缓存行（`$DSH_HOME/storages/*/sessions/<id>.json`），不留无法再显示的幽灵记录
+- **产出文件清理（可选，默认关闭）** —— 打开后，删除会话时还能把这个对话在工作目录里产出的文件**移进隔离夹**（`$DSH_HOME/purge-quarantine-<时间戳>/`），而不是直接删掉；范围可选「仅新建的文件」或「新建的和改过的文件」，模式可选「全部直接隔离」或「先列清单由你勾选」。**默认关闭，不打开就与旧版行为完全一致**
 - **删除后回到新会话** —— 若删除的正是当前打开的会话，自动切到一个全新会话（不再落到已不可用的邻居页——那种页面 composer 会被禁用、侧栏也列不出来，看起来像「没删掉」）
 - **默认安全** —— 宿主路由仅限本机回环（回环 socket + 回环 Host 头 + 同源校验）；被 DSH 打开占用的会话会被明确拒绝（409），绝不与活跃写者竞争
 - **中英双语** —— 菜单项与对话框跟随 DSH 界面语言（zh / en）
@@ -81,19 +82,42 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 - **唯一保留的 DOM 层**：多选勾选框。`sidebar.session.row.leading` 是宿主 `showStatus ? <SessionStatusDots/> : renderSlot(...)` 的 **else 分支**，会话一忙槽位就被顶掉——而批量删除恰恰最常发生在「刚跑完一批」时，所以勾选框仍是对 `[role="treeitem"]` 的 DOM 装饰。行身份取自宿主自己的 `data-row-key="session:<id>"`，**不再遍历 React fiber**
 - 删除链路：停 agent → flush / detach 活跃会话 → 写所有权探测（被占用 → 409）→ 删除目录（两种 ID 写法 + 复核）→ 清理工作区记账与投影缓存
 
+### 产出文件清理
+
+这一档**默认关闭**。打开后（插件管理页 → dsh-delete-session），删除会话时除了对话记录，还会处理**这个对话在工作目录里碰过的文件**：
+
+| 范围 | 处理什么 |
+| --- | --- |
+| 仅新建的文件（默认） | 本对话自己创建的文件 |
+| 新建的和改过的文件 | 再加上被本对话改写的**既有**文件 —— 移走它们会改变工作目录里原本的内容 |
+
+- **移动，不删除**：文件进 `$DSH_HOME/purge-quarantine-<时间戳>/`，保留相对于工作目录的路径，随时可以手工搬回。每次删除**独占**一个新的隔离目录（同名已存在时自动让位），并且**永不覆盖**隔离夹里已有的文件
+- **保存位置可改**：插件管理页里可以输入路径，或点「浏览…」逐层选择目录，留空则用默认（`$DSH_HOME`）。选中的目录必须已存在；会话存储目录、以及该对话自己的工作目录会被拒绝——把文件挪回原地不叫隔离
+- **先算后动**：删除前由宿主端从会话日志重新推导清单；界面里勾选的结果只能缩小范围，不能扩大
+- **「新建」怎么判定**：依据 `fs-observation-policy` 的不变量 —— `write` 覆盖既有文件前必须先成功 `read` 它，所以"首次写之前没有成功读过"就是新建。判定按**文件身份**而非路径拼写：软链接别名与它的真实路径、Windows 上仅大小写不同的写法，都算同一个文件
+- **四道安全过滤**：必须是普通文件、真实路径严格在工作目录内、不在 `$DSH_HOME` 内、必须仍然存在；被跳过的一律在对话框里列出原因
+- **批量删除不走这一档**：只有单条删除会处理产出文件
+- **扫描开销**：删除前要为本会话的每个工具调用解析一次路径身份。同一路径在一次扫描内只解析一次，且**一次删除只推导一遍清单**——1000 次工具调用的长会话实测约 0.25s（未做记忆化时是 2.8s）
+- **「不再询问」不会让询问模式静默失效**：那条设置用于跳过对话框，但只要范围是「先列清单」，对话框仍会弹出——清单只在对话框里，跳过它等于功能什么都不做
+
 ### 测试
 
-- `test/checkbox.dom.test.js` —— 24 项（`node --test`，零依赖）：把真实的 `src/client.js` 跑在一个可读的 DOM 实现上，经由用户真正会碰的入口驱动——即它**注册进槽位的那些组件**、它们渲染出的元素树、以及它自己生成的 DOM。断言 **「存在 `.dsdel-check` ⟺ 多选模式开启」**，外加接入契约本身（槽位 id / order / props、对话框确实用宿主 `Modal`、菜单经 `useMenuOpenState` 关闭、`apply()` 时不再安装任何菜单扫描 observer、行身份只认 `data-row-key` 而不认 fiber、`locale` 晚到时字典仍会注册、删除行向宿主申请 `danger` 样式、插件页卡片在宿主不注入 `t` 时仍能渲染）
+- `test/checkbox.dom.test.js` —— 35 项（`node --test`，零依赖）：把真实的 `src/client.js` 跑在一个可读的 DOM 实现上，经由用户真正会碰的入口驱动——即它**注册进槽位的那些组件**、它们渲染出的元素树、以及它自己生成的 DOM。断言 **「存在 `.dsdel-check` ⟺ 多选模式开启」**，外加接入契约本身（槽位 id / order / props、对话框确实用宿主 `Modal`、菜单经 `useMenuOpenState` 关闭、`apply()` 时不再安装任何菜单扫描 observer、行身份只认 `data-row-key` 而不认 fiber、`locale` 晚到时字典仍会注册、删除行向宿主申请 `danger` 样式、插件页卡片在宿主不注入 `t` 时仍能渲染）
 - 覆盖的回归：单条删除（`deleteNow` / 对话框确认）会调用 `scheduleDecorate()`，而 v0.1.8 之前 `decorateRows()` **无条件**给每一行插入勾选框、且没有末尾清扫，于是删掉一个会话后所有行都长出了圆勾选框、底部操作条却仍然隐藏——一个「半开」的多选状态
 - 这个测试是有意义的，不是空跑，两个方向都验过：把 `decorateRows()` 恢复成旧写法（逐行守卫与末尾清扫**同时**去掉）会让 **6 项**失败；改成「永不插入勾选框」会让 **5 项**失败
 - 运行：`npm test`（或直接 `node test/checkbox.dom.test.js`，后者不需要 `node --test` 起子进程）
+- 已知未覆盖的分支：跨盘回退用的 COPYFILE_EXCL —— 单机测试里构造不出真正的跨设备 rename 失败，只能靠行为复核确认（EEXIST 时响亮失败、不覆盖蹲点文件）
+- `test/artifacts.host.test.js` —— 34 项：宿主半的产出文件逻辑。驱动真实的 `src/index.js`，覆盖"新建 vs 改过"的判定（含失败调用不计、失败读不算已存在、重复写合并）、四道安全过滤的每一条拒绝原因、隔离移动保留目录结构、以及**被篡改的路径必须被丢弃**这条安全线
 - **尚未验证的一环（诚实说明）**：与真实 DSH 界面的耦合——真实 DOM 结构、真实 CSS 布局、真实菜单卡片高度、以及 React 调和器在重渲染会话行时是否会丢弃注入的勾选框——只能由真实浏览器验证。槽位契约与 primitive 导出已在本机 0.2.1-alpha.4 上静态核对，但**渲染结果没有跑过浏览器**
 
 ### 已知限制
 
 - 被 DSH 当前打开占用的会话：删除会自动等待写所有权释放（通常几秒）后完成；极少数仍被占用的情况会提示稍后重试或重启 DSH
 - 多选勾选框仍是对会话行的 DOM 装饰，依赖宿主 `data-row-key="session:<id>"` 这一属性；核心 UI 若改名，多选会静默失效（**菜单与对话框不受影响**，它们走官方槽位）。其余行装饰（`.dsdel-bar` 操作条、toast）同理
-- 删除不可恢复：没有回收站，也没有撤销
+- 删除不可恢复：没有回收站，也没有撤销。**产出文件清理是例外** —— 它只移动不删除，隔离夹可手工搬回
+- 产出文件清理默认关闭，打开后仍有几条边界：`bash` / `pwsh` 里创建的文件（`npm run build`、`git clone`、`> file`）**永远检测不到**；**目录永不移走**（只会把它里面的文件移空）；清单上限 500 条，超出截断且不会处理未列出的项；**没有还原界面**，隔离夹要靠手工搬回
+- 「新建 vs 改过」的判定依赖 `fs-observation-policy` 保持启用；关掉它会把"改过"误判成"新建"（隔离可撤销是最后一道兜底）
+- 批量删除（多选）**不**处理产出文件
 - 批量删除为客户端 6 路并发 + 乐观隐藏：不同会话并行删除，宿主端写所有权等待缩短为 200ms × 12（单条最长约 2.2s），多个被占用的会话也并行等待；同一工作区记账变更仍串行，避免并发写交错
 
 ### 兼容性
@@ -133,6 +157,7 @@ This plugin puts Delete back where you already click: the session row's `...` me
 - **Confirm once, then skip** — tick "Don't ask again" and later deletes run directly from the menu (a toast reports the result); **hold Shift while clicking** to force the dialog back, or clear `localStorage['dsh-delete-session:skip-confirm']` to restore it permanently
 - **Multi-select batch delete** — "Select multiple" in the session menu enters selection mode: every row gets a round checkbox, clicking a row toggles it (it never opens the conversation), and a bottom bar shows "N selected / Cancel / Delete". Delete runs **immediately** (no confirm dialog, no select-all, every row selectable): selected rows are hidden optimistically, the bar shows live progress ("Deleting x/N..."), and the client runs 6 concurrent requests (independent sessions in parallel, workspace accounting serialized), then reports a toast summary; failed rows reappear immediately and stay selected for a quick retry; Esc or Cancel exits
 - **Real deletion** — stops a running agent (cancel + quiescence), flushes and detaches the live session, removes the on-disk session directories (both the raw and `session-` prefixed id), verifies through the persistence service, then cleans workspace accounting so no orphan shows up under "Ungrouped", and removes the session's projection-cache rows (`$DSH_HOME/storages/*/sessions/<id>.json`) so no ghost the sidebar can no longer show is left behind
+- **Produced-file cleanup (opt-in, off by default)** — once enabled, deleting a session can also move the files that conversation produced in its working directory into a quarantine folder (`$DSH_HOME/purge-quarantine-<timestamp>/`) instead of deleting them; the scope is either "files it created" or "created plus changed", and the mode either "send everything straight to quarantine" or "list them and let me tick". **Off by default, so an untouched install behaves exactly as before**
 - **Leaves a fresh session behind** — when the deleted session is the one the main view is showing, the app switches to a brand-new session instead of a stale neighbour (an unavailable row with a disabled composer that the sidebar cannot even list, which reads as "the delete did not work")
 - **Safe by default** — the host route is loopback-only (loopback socket, loopback Host header, same-origin check); a session still held open by DSH is refused with 409 instead of racing the active writer
 - **Bilingual** — the menu items and dialog follow the DSH interface language (zh / en)
@@ -185,19 +210,42 @@ Integration goes entirely through the host's public slot contract — no DOM scr
 - **The one remaining DOM layer**: the multi-select checkboxes. `sidebar.session.row.leading` is the *else* branch of the host's `showStatus ? <SessionStatusDots/> : renderSlot(...)`, so it disappears the moment a row is busy — exactly when a batch delete is most likely. Those checkboxes therefore stay a DOM decoration over `[role="treeitem"]`, with row identity taken from the host's own `data-row-key="session:<id>"`, **never from a React fiber walk**
 - Pipeline: stop agent → flush / detach live session → write-lease probe (busy → 409) → remove directories (both id spellings + verification) → clean workspace accounting and projection caches
 
+### Produced-file cleanup
+
+This half ships **off**. Once enabled (plugin manager page → dsh-delete-session), deleting a session also handles **the files that conversation touched in its working directory**:
+
+| Scope | What it handles |
+| --- | --- |
+| Only files it created (default) | Files this conversation created |
+| Created and changed | Plus the **pre-existing** files it rewrote — moving those changes what was already in the working directory |
+
+- **Moved, never deleted**: files land in `$DSH_HOME/purge-quarantine-<timestamp>/`, keeping their path relative to the working directory, so they can be put back by hand. Each delete **claims its own** quarantine directory (stepping aside if the name is taken) and **never overwrites** a file already in quarantine
+- **The location is configurable**: the plugin page takes a typed path or a folder walked to with **Browse…**, and leaving it empty means the default (`$DSH_HOME`). The directory must already exist; the sessions store and the conversation's own working directory are refused - moving the files back where they came from is not quarantining
+- **Plan first, then act**: the host re-derives the list from the session log before the delete; a selection made in the dialog can only narrow it, never widen it
+- **How "created" is decided**: from the `fs-observation-policy` invariant that `write` may not overwrite a file without first reading it — so a write whose path had no earlier successful read created the file. The decision is made on **file identity**, not path spelling: a symlink alias and its target, or two Windows spellings that differ only in case, are the same file
+- **Four safety filters**: a regular file, its real path strictly inside the working directory, outside `$DSH_HOME`, still present; every skip is listed with its reason in the dialog
+- **Batch delete does not use this**: only a single session delete handles produced files
+- **Scan cost**: a delete resolves a path identity for every tool call in the session. One path resolves once per scan, and **a delete derives its list only once** — a 1000-call session measured about 0.25s (2.8s before memoisation)
+- **"Don't ask again" cannot silently disable the ask mode**: that setting skips the dialog, but a list-scope run still opens it — the list only exists there, so skipping it would make the feature do nothing
+
 ### Tests
 
-- `test/checkbox.dom.test.js` — 24 cases (`node --test`, zero dependencies): it runs the real `src/client.js` against a readable DOM implementation and drives it only through surfaces a user touches — the components it **registers into slots**, the element trees those render, and the DOM it builds. It asserts that **a `.dsdel-check` exists if and only if multi-select is on**, plus the integration contract itself (slot ids / orders / props, the dialog really using the host `Modal`, the menu being dismissed through `useMenuOpenState`, `apply()` installing no menu-scanning observer at all, row identity coming only from `data-row-key` and never from a fiber, the dictionaries still being registered when `locale` arrives late, the delete row asking the host for its `danger` tone, and the plugin page card still rendering when the host injects no `t`)
+- `test/checkbox.dom.test.js` — 35 cases (`node --test`, zero dependencies): it runs the real `src/client.js` against a readable DOM implementation and drives it only through surfaces a user touches — the components it **registers into slots**, the element trees those render, and the DOM it builds. It asserts that **a `.dsdel-check` exists if and only if multi-select is on**, plus the integration contract itself (slot ids / orders / props, the dialog really using the host `Modal`, the menu being dismissed through `useMenuOpenState`, `apply()` installing no menu-scanning observer at all, row identity coming only from `data-row-key` and never from a fiber, the dictionaries still being registered when `locale` arrives late, the delete row asking the host for its `danger` tone, and the plugin page card still rendering when the host injects no `t`)
 - The regression it covers: a plain single delete (`deleteNow` / the dialog's confirm handler) calls `scheduleDecorate()`, and before v0.1.8 `decorateRows()` planted a checkbox on **every** row unconditionally with no trailing sweep — so after deleting one session every row grew a round checkbox while the batch bar stayed hidden, a "half-on" multi-select state
 - The test earns its keep, verified in both directions: restoring `decorateRows()` to the old shape (dropping the per-row guard *and* the trailing sweep together) fails **6** of its cases, and a fix that never plants checkboxes fails **5**
 - Run it with `npm test` (or `node test/checkbox.dom.test.js` directly, which needs no `node --test` child process)
+- One branch is knowingly uncovered: the cross-device fallback's COPYFILE_EXCL. A local test cannot provoke a real cross-device rename failure, so it was confirmed by review instead (it fails loudly on EEXIST and never replaces a planted file)
+- `test/artifacts.host.test.js` — 34 cases: the host half's produced-file logic. It drives the real `src/index.js` and covers the created-versus-changed decision (failed calls ignored, a failed read not counting as "existed", repeat writes collapsing), every rejection reason in the four safety filters, quarantine preserving the directory structure, and **a tampered path list being dropped**
 - **Not verified (honest note):** the coupling to the real DSH UI — real DOM structure, real CSS layout, the real menu card height, and whether React's reconciler drops injected checkboxes when it re-renders a session row — can only be checked in a real browser. The slot contract and the primitive exports were statically checked against DSH 0.2.1-alpha.4 on the developer's machine, but **nothing has been rendered in a browser**
 
 ### Known limitations
 
 - A session DSH currently holds open: the delete waits for the write lease to be released (usually a few seconds) and then completes; in the rare case it stays busy, the dialog asks you to retry later or restart DSH
 - The multi-select checkboxes are still a DOM decoration over session rows and depend on the host's `data-row-key="session:<id>"` attribute; if core UI renames it, multi-select goes silently inert (**the menu and dialog are unaffected** — they use official slots). The same applies to the other row decoration (the `.dsdel-bar` action bar and the toast)
-- Deletion is permanent: there is no trash bin and no undo
+- Deletion is permanent: there is no trash bin and no undo. **Produced-file cleanup is the exception** — it only moves files, and the quarantine folder can be put back by hand
+- Produced-file cleanup is off by default, and even enabled it has edges: files created from `bash` / `pwsh` (`npm run build`, `git clone`, `> file`) are **never detected**; **directories are never moved** (only the files inside them are); the list is capped at 500 rows and anything unlisted is left alone; **there is no restore UI**, so the quarantine folder is moved back by hand
+- The created-versus-changed decision depends on `fs-observation-policy` staying enabled; with it off, a changed file can be mistaken for a created one (the reversible quarantine is the backstop)
+- Batch delete does **not** handle produced files
 - Batch delete uses 6-way client concurrency with optimistic hiding: independent sessions delete in parallel and the host write-lease wait is shortened to 200ms x 12 (max ~2.2s per item), so busy sessions wait in parallel too; workspace accounting stays serialized so concurrent deletions never interleave on the same store
 
 ### Compatibility

@@ -37,7 +37,7 @@ window.__ModuleLoader__.load({
       menu: '删除会话',
       multiSelect: '多选',
       title: '删除会话',
-      desc: '将永久删除该会话及其全部对话记录（会话日志、工作区记账与统计），此操作不可恢复。',
+      desc: '将把该会话及其全部对话记录（会话日志、工作区记账与统计）从列表中移除，并放进系统回收站。',
       cancel: '取消',
       confirm: '删除',
       deleting: '删除中…',
@@ -50,6 +50,10 @@ window.__ModuleLoader__.load({
       cancelSelect: '取消',
       selectedCount: (n) => `已选 ${n} 个`,
       batchRunning: (done, total) => `正在删除 ${done}/${total}…`,
+      moveSelected: '移动',
+      batchMoving: (done, total) => `正在移动 ${done}/${total}…`,
+      batchMoved: (ok, fail) => (fail > 0 ? `已移动 ${ok} 个 / ${fail} 个失败` : `已移动 ${ok} 个`),
+      moveBadResult: (fields) => `移动结果缺少字段：${fields}`,
       deleteSelected: '删除',
       batchDone: (n) => `已删除 ${n} 个会话`,
       batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
@@ -57,15 +61,68 @@ window.__ModuleLoader__.load({
       pageAsk: '删除时询问',
       pageHintAsk: '每次删除会话前都会弹出确认框。',
       pageHintAuto: '删除会话会直接执行，不再询问。',
+      // The produced-file list only exists inside the dialog, so ask mode keeps a
+      // delete dialog even when the confirmation above is turned off.
+      pageHintAutoWithArtifacts: '删除会话仍会弹窗——产出文件要先列清单给你勾选。',
       pageSummaryAsk: '删除前询问',
       pageSummaryAuto: '直接删除',
+      pageArtifactsOff: '不处理产出文件（保持当前行为）',
+      pageHintArtifactsOff: '删除会话只清理对话记录，完全不碰工作目录里的文件。',
+      pageHintArtifactsOn: '删除会话时还会处理这个对话在工作目录里碰过的文件。',
+      pageArtifactsAuto: '产出文件默认全部进隔离夹',
+      pageHintArtifactsAuto: '按下面的范围把匹配的文件全部移入隔离夹，不再询问。',
+      pageHintArtifactsAsk: '删除会话时会列出文件清单，由你勾选。',
+      pageScopeCreated: '仅新建的文件',
+      pageScopeAll: '新建的和改过的文件',
+      pageScopeCreatedHint: '只动这个对话自己创建的文件；它改过的既有文件一律不动。',
+      pageScopeAllHint: '还会包含这个对话改写过的既有文件 —— 移走它们会改变工作目录里原有的内容。',
+      pageSkipGit: '跳过 git 仓库内的文件',
+      pageSkipGitOn: '只处理不在 git 仓库里的文件；仓库里的代码不会被搬走。',
+      pageSkipGitOff: '仓库里的文件也会被搬进隔离夹 —— 删一个在项目里干过活的对话，可能把项目源码一起搬走。',
+      pageSummaryArtifactsOff: '不处理产出文件',
+      pageSummaryArtifactsAuto: '产出文件自动隔离',
+      pageSummaryArtifactsAsk: '产出文件先询问',
+      pageRootLabel: '隔离夹保存位置',
+      pageRootPlaceholder: '留空则使用默认路径',
+      pageRootBrowse: '选择文件夹…',
+      pageRootOpen: '打开',
+      rootOpened: '已在文件管理器中打开',
+      rootOpenFailed: '打开失败：',
+      pickerOpening: '已打开系统文件夹对话框，请在弹出的窗口里选择',
+      pageRootReset: '用默认',
+      pageRootDefaultHint: (path) => `当前使用默认路径：${path}`,
+      pageRootCustomHint: '隔离夹会建在这个目录下，每次删除生成一个带时间戳的子目录',
+      pickerTitle: '选择隔离夹保存位置',
+      pickerLoading: '读取中…',
+      pickerEmpty: '这个目录下没有子目录',
+      pickerChoose: '选择此目录',
+      pickerTruncated: '子目录太多，只列出前 500 个',
+      pickerDefault: (path) => `默认路径：${path}`,
+      rootSet: '保存位置已更新',
+      artifactSection: '本对话产出的文件',
+      artifactLoading: '正在扫描…',
+      artifactFailed: '扫描失败：',
+      artifactNone: '没有需要处理的文件。',
+      artifactCount: (created, modified) => `新建 ${created} 个 · 改过 ${modified} 个`,
+      artifactAutoNote: (n) => `删除后将把 ${n} 个文件移入隔离夹`,
+      // Auto mode does not scan, so it can state the outcome but not a count.
+      artifactAutoOnly: '产出文件会自动全部移入隔离夹，这里不再逐个列出。',
+      artifactRefused: (n) => `另有 ${n} 项已跳过`,
+      artifactSelected: (n) => `已选 ${n} 个`,
+      artifactMore: (n) => `另有 ${n} 个未列出`,
+      artifactTruncated: '清单过长已截断，未列出的不会处理。',
+      artifactScopeCreated: '范围：仅新建',
+      artifactScopeAll: '范围：新建 + 改过',
+      artifactModifiedWarn: '改过的既有文件（默认不选）：',
+      doneQuarantine: (n) => `已删除会话，${n} 个文件已移入隔离夹`,
+      doneQuarantineFailed: (ok, fail) => `已删除会话，隔离 ${ok} 个、${fail} 个失败`,
     }
 
     const en = {
       menu: 'Delete session',
       multiSelect: 'Select multiple',
       title: 'Delete session',
-      desc: 'This permanently deletes the session and all of its conversation records (log, workspace accounting and statistics). This action cannot be undone.',
+      desc: 'This removes the session and all of its conversation records (log, workspace accounting and statistics) from the list and puts them in the system trash.',
       cancel: 'Cancel',
       confirm: 'Delete',
       deleting: 'Deleting...',
@@ -78,6 +135,10 @@ window.__ModuleLoader__.load({
       cancelSelect: 'Cancel',
       selectedCount: (n) => `${n} selected`,
       batchRunning: (done, total) => `Deleting ${done}/${total}...`,
+      moveSelected: 'Move',
+      batchMoving: (done, total) => `Moving ${done}/${total}...`,
+      batchMoved: (ok, fail) => (fail > 0 ? `Moved ${ok}, ${fail} failed` : `Moved ${ok}`),
+      moveBadResult: (fields) => `Move result is missing fields: ${fields}`,
       deleteSelected: 'Delete',
       batchDone: (n) => `Deleted ${n} session(s)`,
       batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
@@ -85,8 +146,58 @@ window.__ModuleLoader__.load({
       pageAsk: 'Ask before deleting',
       pageHintAsk: 'Show a confirmation dialog before every session delete.',
       pageHintAuto: 'Delete the session right away without asking.',
+      pageHintAutoWithArtifacts: 'A delete still opens a dialog, because the produced-file list has to be shown first.',
       pageSummaryAsk: 'Ask before deleting',
       pageSummaryAuto: 'Delete without asking',
+      pageArtifactsOff: 'Leave produced files alone (current behaviour)',
+      pageHintArtifactsOff: 'Deleting a session clears its record only and never touches files in the working directory.',
+      pageHintArtifactsOn: 'Deleting a session also handles the files this conversation touched in its working directory.',
+      pageArtifactsAuto: 'Send produced files straight to quarantine',
+      pageHintArtifactsAuto: 'Every file in the scope below moves to quarantine without asking.',
+      pageHintArtifactsAsk: 'Deleting a session lists the files and lets you tick what to move.',
+      pageScopeCreated: 'Only files it created',
+      pageScopeAll: 'Created and changed files',
+      pageScopeCreatedHint: 'Touches only files this conversation created; files it merely edited are never moved.',
+      pageScopeAllHint: 'Also includes pre-existing files this conversation rewrote — moving them changes what was already in the working directory.',
+      pageSkipGit: 'Skip files inside a git repository',
+      pageSkipGitOn: 'Only files outside git repositories are handled; code inside a repository is never moved.',
+      pageSkipGitOff: 'Repository files move into quarantine too — deleting a conversation that worked in a project can carry the project source away.',
+      pageSummaryArtifactsOff: 'Produced files left alone',
+      pageSummaryArtifactsAuto: 'Produced files auto-quarantined',
+      pageSummaryArtifactsAsk: 'Produced files ask first',
+      pageRootLabel: 'Quarantine folder location',
+      pageRootPlaceholder: 'Leave empty to use the default path',
+      pageRootBrowse: 'Choose folder…',
+      pageRootOpen: 'Open',
+      rootOpened: 'Opened in the file manager',
+      rootOpenFailed: 'Could not open: ',
+      pickerOpening: 'The system folder dialog is open; pick a folder in that window',
+      pageRootReset: 'Use default',
+      pageRootDefaultHint: (path) => `Using the default path: ${path}`,
+      pageRootCustomHint: 'The quarantine folder is created here, one timestamped subfolder per delete',
+      pickerTitle: 'Choose where quarantined files go',
+      pickerLoading: 'Reading…',
+      pickerEmpty: 'No subfolders here',
+      pickerChoose: 'Use this folder',
+      pickerTruncated: 'Too many subfolders: only the first 500 are listed',
+      pickerDefault: (path) => `Default path: ${path}`,
+      rootSet: 'Location updated',
+      artifactSection: 'Files this conversation produced',
+      artifactLoading: 'Scanning...',
+      artifactFailed: 'Scan failed: ',
+      artifactNone: 'Nothing to handle.',
+      artifactCount: (created, modified) => `${created} created · ${modified} changed`,
+      artifactAutoNote: (n) => `${n} file(s) will move to quarantine on delete`,
+      artifactAutoOnly: 'Produced files move to quarantine automatically; they are not listed here.',
+      artifactRefused: (n) => `${n} more were skipped`,
+      artifactSelected: (n) => `${n} selected`,
+      artifactMore: (n) => `${n} more not listed`,
+      artifactTruncated: 'The list was truncated; anything unlisted is left alone.',
+      artifactScopeCreated: 'Scope: created only',
+      artifactScopeAll: 'Scope: created + changed',
+      artifactModifiedWarn: 'Pre-existing files it changed (unticked by default):',
+      doneQuarantine: (n) => `Session deleted, ${n} file(s) moved to quarantine`,
+      doneQuarantineFailed: (ok, fail) => `Session deleted, ${ok} quarantined and ${fail} failed`,
     }
 
     let sessionsSvc = null
@@ -118,6 +229,25 @@ window.__ModuleLoader__.load({
       return typeof value === 'function' ? value(a, b) : value || key
     }
 
+    /**
+     * Wrap a host-injected `t` so function-valued entries render their value.
+     *
+     * The locale contract leaves a function entry untouched: `translate(key, a, b)`
+     * returns the arrow function itself, and the caller is the one that invokes it.
+     * Using the injected `t` directly therefore printed the function's own source
+     * in the dialog ("(created, modified) => ...") instead of the numbers.
+     */
+    function localizedTranslator(injected) {
+      const raw = typeof injected === 'function' ? injected : t
+      if (raw.__dsdelLocalized === true) return raw
+      const wrapped = (key, a, b) => {
+        const value = raw(key, a, b)
+        return typeof value === 'function' ? value(a, b) : value
+      }
+      wrapped.__dsdelLocalized = true
+      return wrapped
+    }
+
     // --- state -----------------------------------------------------------------
     // One module-level store shared by the slot components and the DOM layer.
     // Components read it through `useSnapshot`, so each stays a plain function of
@@ -133,6 +263,10 @@ window.__ModuleLoader__.load({
       pending: new Set(),
       /** { total, done, failed } while a batch delete runs, else null. */
       batch: null,
+      /** Folder-picker state while it is open, else null. */
+      picker: null,
+      /** The host's default quarantine root, fetched once so the card can name it. */
+      defaultRoot: null,
     }
 
     const listeners = new Set()
@@ -144,6 +278,8 @@ window.__ModuleLoader__.load({
         selected: state.selected,
         pending: state.pending,
         batch: state.batch,
+        picker: state.picker,
+        defaultRoot: state.defaultRoot,
         selectedCount: state.selected.size,
       }
     }
@@ -209,13 +345,184 @@ window.__ModuleLoader__.load({
       return () => { skipListeners.delete(listener) }
     }
 
+    // --- artifact preferences --------------------------------------------------
+    // The produced-files feature ships OFF: `OFF_KEY` is ticked unless the user
+    // explicitly clears it, so an existing install keeps behaving exactly as it
+    // did before the feature existed. When it is on, `AUTO_KEY` decides whether
+    // the dialog asks, and `SCOPE_KEY` decides what the candidate set is.
+
+    const OFF_KEY = 'dsh-delete-session:artifacts-off'
+    const AUTO_KEY = 'dsh-delete-session:artifacts-auto'
+    const SCOPE_KEY = 'dsh-delete-session:artifact-scope'
+    /** Where the timestamped quarantine folder is created. Empty means the DSH home. */
+    const ROOT_KEY = 'dsh-delete-session:quarantine-root'
+    /** Skip files inside a git working tree when quarantining. */
+    const SKIP_GIT_KEY = 'dsh-delete-session:skip-git'
+    /** How many artifact rows the dialog lists before collapsing the rest. */
+    const ARTIFACT_ROWS_SHOWN = 40
+    const prefListeners = new Set()
+
+    function readPref(key, fallback) {
+      try {
+        const value = localStorage.getItem(key)
+        return value === null ? fallback : value
+      } catch {
+        return fallback
+      }
+    }
+
+    function writePref(key, value) {
+      try {
+        if (value === null) localStorage.removeItem(key)
+        else localStorage.setItem(key, value)
+      } catch {
+        // private mode: the preference simply does not persist
+      }
+      for (const listener of prefListeners) {
+        try { listener() } catch { /* a subscriber must not break the toggle */ }
+      }
+    }
+
+    function subscribePrefs(listener) {
+      prefListeners.add(listener)
+      return () => { prefListeners.delete(listener) }
+    }
+
+    /** Whether the produced-files feature is off. Off unless explicitly enabled. */
+    function artifactsOff() {
+      return readPref(OFF_KEY, '1') !== '0'
+    }
+
+    function setArtifactsOff(off) {
+      writePref(OFF_KEY, off ? null : '0')
+    }
+
+    /** Whether the whole candidate set moves without asking. */
+    function artifactsAuto() {
+      return readPref(AUTO_KEY, '0') === '1'
+    }
+
+    function setArtifactsAuto(auto) {
+      writePref(AUTO_KEY, auto ? '1' : null)
+    }
+
+    /** Candidate scope: files this session created, or those plus the ones it changed. */
+    function artifactScope() {
+      return readPref(SCOPE_KEY, 'created') === 'all' ? 'all' : 'created'
+    }
+
+    function setArtifactScope(scope) {
+      writePref(SCOPE_KEY, scope === 'all' ? 'all' : 'created')
+    }
+
+    /**
+     * Skip files that live inside a git working tree. On by default: a session
+     * started in a repository produces that repository's source, and moving it
+     * out from under the project is never what "clean up the files this chat
+     * created" means.
+     */
+    function skipGitRepos() {
+      return readPref(SKIP_GIT_KEY, '1') === '1'
+    }
+
+    function setSkipGitRepos(skip) {
+      writePref(SKIP_GIT_KEY, skip ? null : '0')
+    }
+
+    /** The chosen quarantine root, or '' for "use the host default". */
+    function quarantineRoot() {
+      return readPref(ROOT_KEY, '')
+    }
+
+    function setQuarantineRoot(value) {
+      writePref(ROOT_KEY, typeof value === 'string' && value.trim() !== '' ? value.trim() : null)
+    }
+
     // --- host calls ------------------------------------------------------------
 
-    function postDelete(sessionId) {
+    /** The read-only artifact scan the dialog renders. */
+    function postArtifacts(sessionId) {
+      const root = quarantineRoot()
+      const payload = root === '' ? { sessionId } : { sessionId, root }
+      payload.skipGit = skipGitRepos()
+      return fetch('/dsh-delete-session/artifacts', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`)
+        return data
+      })
+    }
+
+    /** One directory listing for the folder picker. */
+    function postBrowse(target) {
+      return fetch('/dsh-delete-session/browse', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(target === undefined || target === '' ? {} : { path: target }),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`)
+        return data
+      })
+    }
+
+    /**
+     * Ask the host to raise the real Windows folder dialog. The request stays open
+     * while the user browses, so `code` is carried on failures: `unsupported`
+     * means this platform has no native dialog and the in-page picker should run.
+     */
+    function postPick() {
+      return fetch('/dsh-delete-session/pick', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) {
+          const error = new Error((data && data.error) || `HTTP ${res.status}`)
+          error.code = data && data.code
+          throw error
+        }
+        return data
+      })
+    }
+
+    /** Ask the host to show a directory in the OS file manager. */
+    function postReveal(target) {
+      return fetch('/dsh-delete-session/reveal', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: target }),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`)
+        return data
+      })
+    }
+
+    /** Show the quarantine folder the current settings would write to. */
+    function openQuarantineRoot(target) {
+      if (typeof target !== 'string' || target === '') return
+      postReveal(target)
+        .then(() => toast(t('rootOpened')))
+        .catch((reason) => toast(t('rootOpenFailed') + String((reason && reason.message) || reason), true))
+    }
+
+    function postDelete(sessionId, quarantine) {
+      const root = quarantineRoot()
+      const payload = quarantine === undefined ? { sessionId } : { sessionId, quarantine }
+      if (root !== '') payload.root = root
       return fetch('/dsh-delete-session/delete', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify(payload),
       }).then(async (res) => {
         let data = {}
         try { data = await res.json() } catch { /* keep {} */ }
@@ -298,6 +605,16 @@ window.__ModuleLoader__.load({
       '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
       '.dsdel-page{display:flex;flex-direction:column;gap:8px}',
       '.dsdel-page-hint{margin:0;color:var(--dsw-alias-label-tertiary,#888);font-size:13px;line-height:20px}',
+      '.dsdel-root-input{flex:1 1 220px;min-width:160px;min-height:30px;padding:0 10px;border:1px solid var(--dsw-alias-border-secondary,#d0d0d0);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px}',
+      '.dsdel-picker-path{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-all}',
+      // A wider confirmation dialog: the class reaches it when `Modal` forwards
+      // `className`, and the `:has()` rule catches the host-owned container when
+      // it does not. Both are harmless if the other one is the one that applies.
+      '.dsdel-dialog-wide{width:min(94vw,980px)!important;max-width:min(94vw,980px)!important}',
+      '[role="dialog"]:has(.dsdel-modal-meta),[aria-modal="true"]:has(.dsdel-modal-meta){width:min(94vw,980px);max-width:min(94vw,980px)}',
+      '.dsdel-picker-list{display:flex;flex-direction:column;gap:2px;max-height:280px;overflow:auto;margin:0 0 8px}',
+      '.dsdel-picker-row{appearance:none;text-align:left;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;cursor:pointer}',
+      '.dsdel-picker-row:hover{background:var(--dsw-alias-fill-secondary,rgba(127,127,127,0.12))}',
       '.dsdel-modal-text{margin:0;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-all}',
       '.dsdel-modal-meta{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#888);word-break:break-all}',
       '.dsdel-modal-error{margin:8px 0 0;font-size:12px;line-height:16px;color:var(--dsw-alias-state-error-primary,#e5484d)}',
@@ -310,7 +627,14 @@ window.__ModuleLoader__.load({
 
     function ensureStyle() {
       if (typeof document === 'undefined') return
-      if (document.querySelector('style[data-dsh-delete-session]')) return
+      const existing = document.querySelector('style[data-dsh-delete-session]')
+      if (existing !== null) {
+        // This tag outlives the module instance: when a newer build re-executes in
+        // the same document, bailing out here would keep the old stylesheet and
+        // pair it with the new markup. Rewriting it keeps the two in step.
+        if (existing.textContent !== CSS) existing.textContent = CSS
+        return
+      }
       const style = document.createElement('style')
       style.dataset.dshDeleteSession = '1'
       style.textContent = CSS
@@ -396,18 +720,46 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * The bulk-move face `dsh-session-relocate` publishes on `window`. Read when
+     * the bar is built rather than cached at module load, so a relocate plugin
+     * that registers after this one is still picked up.
+     */
+    function relocateApi() {
+      if (typeof window === 'undefined') return null
+      const api = window.__DSH_SESSION_RELOCATE__
+      if (!api || api.supportsBulkMove !== true) return null
+      if (typeof api.moveSelection !== 'function') return null
+      return api
+    }
+
     function updateBar() {
       if (!bar) return
       const count = bar.querySelector('.dsdel-bar-count')
       if (count) {
-        count.textContent = state.batch
-          ? t('batchRunning', state.batch.done + state.batch.failed, state.batch.total)
-          : t('selectedCount', state.selected.size)
+        if (state.batch === null) {
+          count.textContent = t('selectedCount', state.selected.size)
+        } else {
+          // A move reports processed-so-far (success + failure + skip) in one
+          // number; a delete counts its own two buckets.
+          const done = state.batch.kind === 'move'
+            ? state.batch.done
+            : state.batch.done + state.batch.failed
+          count.textContent = state.batch.kind === 'move'
+            ? t('batchMoving', done, state.batch.total)
+            : t('batchRunning', done, state.batch.total)
+        }
       }
-      const cancel = bar.querySelector('.dsdel-bar-btn:not(.dsdel-bar-danger)')
+      const busy = state.batch !== null
+      const empty = state.selected.size === 0
+      const cancel = bar.querySelector('.dsdel-bar-cancel')
+      const move = bar.querySelector('.dsdel-bar-move')
       const del = bar.querySelector('.dsdel-bar-danger')
-      if (cancel) cancel.disabled = state.batch !== null
-      if (del) del.disabled = state.batch !== null || state.selected.size === 0
+      if (cancel) cancel.disabled = busy
+      // Move and delete both need something selected, and both are inert while a
+      // batch is already running.
+      if (move) move.disabled = busy || empty
+      if (del) del.disabled = busy || empty
     }
 
     function buildBar() {
@@ -418,7 +770,8 @@ window.__ModuleLoader__.load({
       count.className = 'dsdel-bar-count'
       const cancel = document.createElement('button')
       cancel.type = 'button'
-      cancel.className = 'dsdel-bar-btn'
+      // Named so the bar never has to guess which plain button is Cancel.
+      cancel.className = 'dsdel-bar-btn dsdel-bar-cancel'
       cancel.textContent = t('cancelSelect')
       cancel.addEventListener('click', (e) => { e.stopPropagation(); exitSelection() })
       const del = document.createElement('button')
@@ -428,6 +781,16 @@ window.__ModuleLoader__.load({
       del.addEventListener('click', (e) => { e.stopPropagation(); runBatchDelete() })
       el.appendChild(count)
       el.appendChild(cancel)
+      // One more button when dsh-session-relocate is installed; otherwise the bar
+      // is exactly what it was before.
+      if (relocateApi() !== null) {
+        const move = document.createElement('button')
+        move.type = 'button'
+        move.className = 'dsdel-bar-btn dsdel-bar-move'
+        move.textContent = t('moveSelected')
+        move.addEventListener('click', (e) => { e.stopPropagation(); runBatchMove() })
+        el.appendChild(move)
+      }
       el.appendChild(del)
       document.body.appendChild(el)
       return el
@@ -513,7 +876,7 @@ window.__ModuleLoader__.load({
       if (state.batch !== null) return
       const ids = [...state.selected]
       if (ids.length === 0) return
-      state.batch = { total: ids.length, done: 0, failed: 0 }
+      state.batch = { kind: 'delete', total: ids.length, done: 0, failed: 0 }
       state.selected.clear()
       for (const id of ids) state.pending.add(id)
       publish()
@@ -563,14 +926,90 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * Hand the selection to dsh-session-relocate. That plugin owns the target
+     * picker and the move itself; this side runs the progress readout and the
+     * summary. A cancelled picker leaves the selection untouched and says
+     * nothing, because nothing happened.
+     */
+    async function runBatchMove() {
+      if (state.batch !== null) return
+      const api = relocateApi()
+      if (api === null) return
+      const ids = [...state.selected]
+      if (ids.length === 0) return
+
+      state.batch = { kind: 'move', total: ids.length, done: 0, failed: 0 }
+      publish()
+      updateBar()
+
+      let result
+      try {
+        result = await api.moveSelection(ids, {
+          onProgress: (done, total) => {
+            if (state.batch === null || state.batch.kind !== 'move') return
+            if (typeof done === 'number' && Number.isFinite(done)) state.batch.done = Math.max(0, done)
+            if (typeof total === 'number' && Number.isFinite(total)) state.batch.total = Math.max(1, total)
+            updateBar()
+          },
+        })
+      } catch (reason) {
+        state.batch = null
+        publish()
+        updateBar()
+        toast(t('failed') + String((reason && reason.message) || reason), true)
+        return
+      }
+
+      state.batch = null
+      // `canceled` is the contract spelling; `cancelled` is also honoured because
+      // the contract's first draft used it. Nothing else about the result is
+      // guessed: a missing count is reported, never substituted.
+      if (result && (result.canceled === true || result.cancelled === true)) {
+        // The user backed out of the target picker; keep the selection for a retry.
+        publish()
+        updateBar()
+        return
+      }
+
+      const missing = ['moved', 'failed', 'total'].filter((key) => !result || typeof result[key] !== 'number')
+      if (missing.length > 0) {
+        // Falling back here would turn "genuinely zero failures" and "the field
+        // was not sent" into the same summary, so the shape is enforced instead.
+        toast(t('moveBadResult', missing.join(', ')), true)
+        exitSelection()
+        refreshList()
+        return
+      }
+
+      toast(t('batchMoved', result.moved, result.failed), result.failed > 0)
+      exitSelection()
+      refreshList()
+      if (result.failed === 0) {
+        for (const id of ids) leaveIfCurrent(id)
+      }
+    }
+
     // --- single delete ---------------------------------------------------------
 
     function deleteNow(info) {
       state.pending.add(info.sessionId)
       publish()
-      postDelete(info.sessionId)
-        .then(() => {
-          toast(t('done'))
+      // The no-dialog path can only honour auto mode: ask mode needs the list,
+      // and the menu row forces the dialog in that case. With the feature off no
+      // quarantine field is sent at all, keeping the request identical to the
+      // version that predates the feature.
+      const quarantine = !artifactsOff() && artifactsAuto() ? { scope: artifactScope() } : undefined
+      postDelete(info.sessionId, quarantine)
+        .then((result) => {
+          const outcome = result && result.quarantine ? result.quarantine : null
+          if (outcome !== null && outcome.failed.length > 0) {
+            toast(t('doneQuarantineFailed', outcome.moved.length, outcome.failed.length), true)
+          } else if (outcome !== null && outcome.moved.length > 0) {
+            toast(t('doneQuarantine', outcome.moved.length))
+          } else {
+            toast(t('done'))
+          }
           refreshList()
           settlePendingSoon()
           leaveIfCurrent(info.sessionId)
@@ -582,15 +1021,174 @@ window.__ModuleLoader__.load({
         })
     }
 
+    /** The rows a scope selects, in list order. */
+    function candidatePaths(plan, scope) {
+      if (plan === null || plan === undefined) return []
+      const rows = scope === 'all' ? [...plan.created, ...plan.modified] : [...plan.created]
+      return rows.map((row) => row.path)
+    }
+
     function openDeleteDialog(sessionId, title) {
-      state.dialog = { sessionId, title: title || null, busy: false, error: null, skip: false }
+      // With the feature off the dialog carries no artifact section at all and
+      // the delete request stays byte-identical to the previous version.
+      //
+      // Auto mode sends `{ scope }` and the host derives the whole set itself, so
+      // the scan result would never be read: scanning there only burns time before
+      // the dialog can appear. Ask mode is the one that needs the listing.
+      const artifacts = artifactsOff()
+        ? null
+        : artifactsAuto()
+          ? { auto: true, loading: false, plan: null, error: null, selected: new Set() }
+          : { auto: false, loading: true, plan: null, error: null, selected: new Set() }
+      state.dialog = { sessionId, title: title || null, busy: false, error: null, skip: false, artifacts }
       publish()
+      if (artifacts !== null && artifacts.auto !== true) loadArtifacts(sessionId)
+    }
+
+    /** Fetch the read-only scan and preselect the current scope's candidates. */
+    function loadArtifacts(sessionId) {
+      const settle = (mutate) => {
+        const dialog = state.dialog
+        if (dialog === null || dialog.artifacts === null || dialog.sessionId !== sessionId) return
+        mutate(dialog.artifacts)
+        publish()
+      }
+      postArtifacts(sessionId)
+        .then((plan) => settle((artifacts) => {
+          artifacts.loading = false
+          artifacts.plan = plan
+          artifacts.selected = new Set(candidatePaths(plan, artifactScope()))
+        }))
+        .catch((reason) => settle((artifacts) => {
+          artifacts.loading = false
+          artifacts.error = String((reason && reason.message) || reason)
+        }))
     }
 
     function closeDeleteDialog() {
       if (state.dialog === null || state.dialog.busy) return
       state.dialog = null
       publish()
+    }
+
+    // --- quarantine folder picker ----------------------------------------------
+
+    /**
+     * Open the folder picker at the configured root. The browser cannot hand a
+     * page a real filesystem path, so the listing comes from the host instead.
+     */
+    function openPicker() {
+      state.picker = {
+        loading: true,
+        error: null,
+        path: '',
+        parent: null,
+        entries: [],
+        roots: [],
+        truncated: false,
+        defaultRoot: state.defaultRoot,
+      }
+      publish()
+      loadPicker(quarantineRoot())
+    }
+
+    function closePicker() {
+      state.picker = null
+      publish()
+    }
+
+    function loadPicker(target) {
+      postBrowse(target)
+        .then((listing) => {
+          if (state.picker === null) return
+          state.picker = {
+            loading: false,
+            error: null,
+            path: listing.path,
+            parent: listing.parent,
+            entries: listing.entries,
+            roots: listing.roots,
+            truncated: listing.truncated,
+            defaultRoot: listing.defaultRoot,
+          }
+          state.defaultRoot = listing.defaultRoot
+          publish()
+        })
+        .catch((reason) => {
+          if (state.picker === null) return
+          state.picker = {
+            ...state.picker,
+            loading: false,
+            error: String((reason && reason.message) || reason),
+          }
+          publish()
+        })
+    }
+
+    /** Commit the directory the picker is showing. */
+    function pickCurrent() {
+      const picker = state.picker
+      if (picker === null || picker.loading || picker.path === '') return
+      setQuarantineRoot(picker.path)
+      closePicker()
+      toast(t('rootSet'))
+    }
+
+    /**
+     * Prefer the OS folder dialog, which is the one the user actually expects.
+     * It only exists on Windows; everywhere else the in-page picker takes over.
+     */
+    let folderDialogOpen = false
+    function chooseFolder() {
+      if (folderDialogOpen) return
+      folderDialogOpen = true
+      // The dialog can open behind the browser window, so say it was raised.
+      toast(t('pickerOpening'))
+      postPick()
+        .then((picked) => {
+          if (picked.cancelled === true) return
+          setQuarantineRoot(picked.path)
+          toast(t('rootSet'))
+        })
+        .catch((reason) => {
+          if (reason && reason.code === 'unsupported') {
+            openPicker()
+            return
+          }
+          toast(t('failed') + String((reason && reason.message) || reason), true)
+        })
+        .finally(() => {
+          folderDialogOpen = false
+        })
+    }
+
+    /** Learn the host default once, so the settings card can name it. */
+    function loadDefaultRoot() {
+      if (state.defaultRoot !== null) return
+      postBrowse('')
+        .then((listing) => {
+          state.defaultRoot = listing.defaultRoot
+          publish()
+        })
+        .catch(() => {
+          // the card falls back to a generic label; nothing to report here
+        })
+    }
+
+    /**
+     * Build the quarantine request for the open dialog. The host re-derives the
+     * candidate set and intersects it with `paths`, so this can only narrow what
+     * the user was shown - never widen it.
+     */
+    function quarantineRequest(dialog) {
+      if (dialog.artifacts === null) return undefined
+      const scope = artifactScope()
+      const skipGit = skipGitRepos()
+      // In auto mode no `paths` is sent: the host takes the whole set it derives.
+      if (artifactsAuto()) return { scope, skipGit }
+      const allowed = new Set(candidatePaths(dialog.artifacts.plan, scope))
+      const paths = [...dialog.artifacts.selected].filter((path) => allowed.has(path))
+      return { scope, paths, skipGit }
     }
 
     // The "don't ask again" flag is committed only when the user actually
@@ -600,14 +1198,22 @@ window.__ModuleLoader__.load({
       const dialog = state.dialog
       if (dialog === null || dialog.busy) return
       if (dialog.skip) setSkipConfirm(true)
+      const quarantine = quarantineRequest(dialog)
       dialog.busy = true
       dialog.error = null
       state.pending.add(dialog.sessionId)
       publish()
-      postDelete(dialog.sessionId)
-        .then(() => {
+      postDelete(dialog.sessionId, quarantine)
+        .then((result) => {
           state.dialog = null
-          toast(t('done'))
+          const outcome = result && result.quarantine ? result.quarantine : null
+          if (outcome !== null && outcome.failed.length > 0) {
+            toast(t('doneQuarantineFailed', outcome.moved.length, outcome.failed.length), true)
+          } else if (outcome !== null && outcome.moved.length > 0) {
+            toast(t('doneQuarantine', outcome.moved.length))
+          } else {
+            toast(t('done'))
+          }
           refreshList()
           settlePendingSoon()
           leaveIfCurrent(dialog.sessionId)
@@ -673,8 +1279,12 @@ window.__ModuleLoader__.load({
         icon: glyph(TRASH_PATHS),
         onSelect: (event) => {
           setMenuOpen(false)
+          // Ask mode keeps the dialog even when "don't ask again" is ticked: the
+          // file list only exists there, and skipping it would make the feature
+          // silently do nothing.
+          const needsDialog = !artifactsOff() && !artifactsAuto()
           // Shift-click always asks, even after "don't ask again" was ticked.
-          if (skipConfirm() && !(event && event.shiftKey)) deleteNow({ sessionId })
+          if (skipConfirm() && !needsDialog && !(event && event.shiftKey)) deleteNow({ sessionId })
           else openDeleteDialog(sessionId, displayTitle)
         },
         children: translate('menu'),
@@ -683,7 +1293,161 @@ window.__ModuleLoader__.load({
 
     // --- confirmation dialog (slot: shell.overlay) -----------------------------
 
-    function DeleteSessionDialog({ t: translate }) {
+    /**
+     * The produced-files section: the scan summary, then either the tick list
+     * (ask mode) or a single line stating how many files will move (auto mode).
+     * A null `artifacts` means the feature is off and the dialog says nothing.
+     */
+    function renderArtifacts(artifacts, translate) {
+      if (artifacts === null) return null
+      // Auto mode never scanned, so there is no plan to describe: name the
+      // outcome instead of showing a list nobody asked for.
+      if (artifacts.auto === true) {
+        return h('div', { key: 'artifacts' }, [
+          h('p', { key: 'head', className: 'dsdel-modal-text', style: { marginTop: '12px', fontWeight: 600 } },
+            translate('artifactSection')),
+          h('p', { key: 'auto', className: 'dsdel-modal-text' }, translate('artifactAutoOnly')),
+        ])
+      }
+      if (artifacts.loading) {
+        return h('p', { key: 'artifacts', className: 'dsdel-modal-meta', style: { marginTop: '12px' } },
+          translate('artifactLoading'))
+      }
+      if (artifacts.error !== null) {
+        return h('p', { key: 'artifacts', className: 'dsdel-modal-error', role: 'alert' },
+          translate('artifactFailed') + artifacts.error)
+      }
+      const plan = artifacts.plan
+      if (plan === null) return null
+      const scope = artifactScope()
+      const auto = artifactsAuto()
+      const rows = scope === 'all' ? [...plan.created, ...plan.modified] : [...plan.created]
+
+      const elements = [
+        h('p', { key: 'head', className: 'dsdel-modal-text', style: { marginTop: '12px', fontWeight: 600 } },
+          translate('artifactSection')),
+        h('p', { key: 'count', className: 'dsdel-modal-meta' },
+          `${translate('artifactCount', plan.created.length, plan.modified.length)} · ${translate(scope === 'all' ? 'artifactScopeAll' : 'artifactScopeCreated')}`),
+      ]
+
+      if (rows.length === 0) {
+        elements.push(h('p', { key: 'none', className: 'dsdel-modal-meta' }, translate('artifactNone')))
+      } else if (auto) {
+        elements.push(h('p', { key: 'auto', className: 'dsdel-modal-text' }, translate('artifactAutoNote', rows.length)))
+      } else {
+        elements.push(h('p', { key: 'selected', className: 'dsdel-modal-meta' },
+          translate('artifactSelected', artifacts.selected.size)))
+        for (const row of rows.slice(0, ARTIFACT_ROWS_SHOWN)) {
+          elements.push(h('label', {
+            key: `row:${row.path}`,
+            className: 'dsdel-modal-text',
+            style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', cursor: 'pointer' },
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: artifacts.selected.has(row.path),
+              onChange: (e) => {
+                if (e && e.target && e.target.checked) artifacts.selected.add(row.path)
+                else artifacts.selected.delete(row.path)
+                publish()
+              },
+            }),
+            h('span', { style: { wordBreak: 'break-all' } }, row.displayPath || row.path),
+          ))
+        }
+        if (rows.length > ARTIFACT_ROWS_SHOWN) {
+          elements.push(h('p', { key: 'more', className: 'dsdel-modal-meta' },
+            translate('artifactMore', rows.length - ARTIFACT_ROWS_SHOWN)))
+        }
+      }
+
+      if (plan.refused.length > 0) {
+        elements.push(h('p', { key: 'refused', className: 'dsdel-modal-meta' },
+          translate('artifactRefused', plan.refused.length)))
+      }
+      if (plan.truncated) {
+        elements.push(h('p', { key: 'truncated', className: 'dsdel-modal-meta' }, translate('artifactTruncated')))
+      }
+      return h('div', { key: 'artifacts' }, elements)
+    }
+
+    /** Folder picker overlay: walk directories, then commit one. */
+    function QuarantinePicker({ t: injected }) {
+      const translate = localizedTranslator(injected)
+      const view = useSnapshot()
+      const picker = view.picker
+      if (picker === null) return null
+
+      const children = []
+      if (picker.loading) {
+        children.push(h('p', { key: 'loading', className: 'dsdel-modal-meta' }, translate('pickerLoading')))
+      } else if (picker.error !== null) {
+        children.push(h('p', { key: 'error', className: 'dsdel-modal-error', role: 'alert' }, picker.error))
+      } else {
+        children.push(h('p', { key: 'path', className: 'dsdel-picker-path' }, picker.path))
+
+        const up = []
+        if (picker.parent !== null) {
+          up.push(h('button', {
+            key: 'up',
+            type: 'button',
+            className: 'dsdel-picker-row',
+            onClick: () => loadPicker(picker.parent),
+          }, '..'))
+        }
+        for (const drive of picker.roots) {
+          up.push(h('button', {
+            key: `drive:${drive.path}`,
+            type: 'button',
+            className: 'dsdel-picker-row',
+            onClick: () => loadPicker(drive.path),
+          }, drive.name))
+        }
+        if (up.length > 0) children.push(h('div', { key: 'up', className: 'dsdel-picker-list' }, up))
+
+        if (picker.entries.length === 0) {
+          children.push(h('p', { key: 'empty', className: 'dsdel-modal-meta' }, translate('pickerEmpty')))
+        } else {
+          children.push(h('div', { key: 'list', className: 'dsdel-picker-list' },
+            picker.entries.map((entry) => h('button', {
+              key: entry.path,
+              type: 'button',
+              className: 'dsdel-picker-row',
+              onClick: () => loadPicker(entry.path),
+            }, `${entry.name}/`))))
+        }
+        if (picker.truncated) {
+          children.push(h('p', { key: 'truncated', className: 'dsdel-modal-meta' }, translate('pickerTruncated')))
+        }
+        children.push(h('p', { key: 'default', className: 'dsdel-modal-meta' },
+          translate('pickerDefault', picker.defaultRoot || '-')))
+      }
+
+      return h(primitives.Modal, {
+        open: true,
+        onClose: () => closePicker(),
+        closeLabel: translate('cancel'),
+        title: translate('pickerTitle'),
+        footer: [
+          h(primitives.Button, {
+            key: 'cancel',
+            variant: 'outline',
+            onClick: () => closePicker(),
+            children: translate('cancel'),
+          }),
+          h(primitives.Button, {
+            key: 'choose',
+            disabled: picker.loading || picker.path === '',
+            onClick: () => pickCurrent(),
+            children: translate('pickerChoose'),
+          }),
+        ],
+        children,
+      })
+    }
+
+    function DeleteSessionDialog({ t: injected }) {
+      const translate = localizedTranslator(injected)
       const view = useSnapshot()
       const dialog = view.dialog
       if (dialog === null) return null
@@ -708,6 +1472,12 @@ window.__ModuleLoader__.load({
 
       return h(primitives.Modal, {
         open: true,
+        // The produced-file list needs more room than the default dialog gives.
+        // `Modal` does not document a width prop, so the class, the inline style
+        // and the `:has()` rule in the stylesheet all try, and whichever the host
+        // honours wins.
+        className: 'dsdel-dialog-wide',
+        style: { width: 'min(94vw, 980px)', maxWidth: 'min(94vw, 980px)' },
         onClose: () => closeDeleteDialog(),
         closeLabel: translate('cancel'),
         title: translate('title'),
@@ -716,6 +1486,7 @@ window.__ModuleLoader__.load({
           h('p', { key: 'meta', className: 'dsdel-modal-meta' },
             `${dialog.title || translate('untitled')} · ${dialog.sessionId}`),
           h('p', { key: 'desc', className: 'dsdel-modal-text' }, translate('desc')),
+          renderArtifacts(dialog.artifacts, translate),
           h('label', {
             key: 'skip',
             className: 'dsdel-modal-text',
@@ -745,12 +1516,35 @@ window.__ModuleLoader__.load({
       // `locale`, so the host injects no `t` here. Falling back to the
       // module-level translator (same dictionaries) keeps the card working
       // instead of throwing on an undefined call.
-      const translate = typeof injected === 'function' ? injected : t
+      const translate = localizedTranslator(injected)
+      // `view` is already the prop name (page or summary), so the store snapshot
+      // needs its own binding here.
+      const pageSnapshot = useSnapshot()
+      // The host owns the default path, so it is fetched once per mount.
+      const defaultRootValue = () => (pageSnapshot && pageSnapshot.defaultRoot) || ''
       const [ask, setAsk] = react.useState(!skipConfirm())
+      const [off, setOff] = react.useState(artifactsOff())
+      const [auto, setAuto] = react.useState(artifactsAuto())
+      const [scope, setScope] = react.useState(artifactScope())
+      const [skipGit, setSkipGit] = react.useState(skipGitRepos())
+      const [root, setRoot] = react.useState(quarantineRoot())
       react.useEffect(() => subscribeSkip(() => setAsk(!skipConfirm())), [])
-      if (view === 'summary') return translate(ask ? 'pageSummaryAsk' : 'pageSummaryAuto')
-      return h('div', { className: 'dsdel-page' },
+      react.useEffect(() => { loadDefaultRoot() }, [])
+      react.useEffect(() => subscribePrefs(() => {
+        setOff(artifactsOff())
+        setAuto(artifactsAuto())
+        setScope(artifactScope())
+        setRoot(quarantineRoot())
+      }), [])
+
+      if (view === 'summary') {
+        if (off) return translate('pageSummaryArtifactsOff')
+        return translate(auto ? 'pageSummaryArtifactsAuto' : 'pageSummaryArtifactsAsk')
+      }
+
+      const children = [
         h(primitives.Checkbox, {
+          key: 'ask',
           checked: ask,
           label: translate('pageAsk'),
           onChange: (checked) => {
@@ -758,14 +1552,158 @@ window.__ModuleLoader__.load({
             setSkipConfirm(checked !== true)
           },
         }),
-        h('p', { className: 'dsdel-page-hint' }, translate(ask ? 'pageHintAsk' : 'pageHintAuto')),
-      )
+        h('p', { key: 'askHint', className: 'dsdel-page-hint' },
+          // Ask mode needs the dialog for its file list, so "delete straight away"
+          // would be a promise this combination does not keep.
+          translate(ask ? 'pageHintAsk' : (!off && !auto ? 'pageHintAutoWithArtifacts' : 'pageHintAuto'))),
+
+        h(primitives.Checkbox, {
+          key: 'off',
+          checked: off,
+          label: translate('pageArtifactsOff'),
+          onChange: (checked) => {
+            setOff(checked === true)
+            setArtifactsOff(checked === true)
+          },
+        }),
+        h('p', { key: 'offHint', className: 'dsdel-page-hint' }, translate(off ? 'pageHintArtifactsOff' : 'pageHintArtifactsOn')),
+      ]
+
+      // Everything below the master switch only matters while the feature is on;
+      // leaving it rendered-but-inert would suggest a setting that does nothing.
+      // The layout is inline rather than a class: a stylesheet injected into the
+      // host page has already proven able to lag behind a rebuilt module, and a
+      // group whose indentation depends on it can silently collapse.
+      if (!off) {
+        children.push(
+          h('div', {
+            key: 'artifacts-sub',
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              marginLeft: '10px',
+              paddingLeft: '14px',
+              borderLeft: '2px solid rgba(127,127,127,0.35)',
+            },
+          },
+            h(primitives.Checkbox, {
+              key: 'auto',
+              checked: auto,
+              label: translate('pageArtifactsAuto'),
+              onChange: (checked) => {
+                setAuto(checked === true)
+                setArtifactsAuto(checked === true)
+              },
+            }),
+            h('p', { key: 'autoHint', className: 'dsdel-page-hint' }, translate(auto ? 'pageHintArtifactsAuto' : 'pageHintArtifactsAsk')),
+            h('div', {
+              key: 'scope',
+              style: {
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '8px',
+                marginLeft: '2px',
+                paddingLeft: '14px',
+                borderLeft: '2px solid rgba(127,127,127,0.2)',
+              },
+            },
+              h(primitives.Checkbox, {
+                key: 'scopeCreated',
+                checked: scope === 'created',
+                label: translate('pageScopeCreated'),
+                onChange: (checked) => {
+                  if (checked !== true) return
+                  setScope('created')
+                  setArtifactScope('created')
+                },
+              }),
+              h(primitives.Checkbox, {
+                key: 'scopeAll',
+                checked: scope === 'all',
+                label: translate('pageScopeAll'),
+                onChange: (checked) => {
+                  if (checked !== true) return
+                  setScope('all')
+                  setArtifactScope('all')
+                },
+              }),
+            ),
+            h('p', { key: 'scopeHint', className: 'dsdel-page-hint' }, translate(scope === 'all' ? 'pageScopeAllHint' : 'pageScopeCreatedHint')),
+            h(primitives.Checkbox, {
+              key: 'skipGit',
+              checked: skipGit,
+              label: translate('pageSkipGit'),
+              onChange: (checked) => {
+                setSkipGit(checked === true)
+                setSkipGitRepos(checked === true)
+              },
+            }),
+            h('p', { key: 'skipGitHint', className: 'dsdel-page-hint' },
+              translate(skipGit ? 'pageSkipGitOn' : 'pageSkipGitOff')),
+            h('div', { key: 'root', style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '2px' } },
+              h('p', { key: 'rootLabel', className: 'dsdel-page-hint' }, translate('pageRootLabel')),
+              h('div', { key: 'rootRow', style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+                h('input', {
+                  key: 'rootInput',
+                  type: 'text',
+                  className: 'dsdel-root-input',
+                  value: root,
+                  placeholder: defaultRootValue() || translate('pageRootPlaceholder'),
+                  spellCheck: false,
+                  onChange: (event) => {
+                    setQuarantineRoot((event && event.target && event.target.value) || '')
+                  },
+                }),
+                h(primitives.Button, {
+                  key: 'browse',
+                  variant: 'outline',
+                  onClick: () => chooseFolder(),
+                  children: translate('pageRootBrowse'),
+                }),
+                h(primitives.Button, {
+                  key: 'open',
+                  variant: 'outline',
+                  onClick: () => openQuarantineRoot(root === '' ? defaultRootValue() : root),
+                  children: translate('pageRootOpen'),
+                }),
+                h(primitives.Button, {
+                  key: 'reset',
+                  variant: 'outline',
+                  disabled: root === '',
+                  onClick: () => setQuarantineRoot(''),
+                  children: translate('pageRootReset'),
+                }),
+              ),
+              h('p', { key: 'rootHint', className: 'dsdel-page-hint' },
+                root === ''
+                  ? translate('pageRootDefaultHint', defaultRootValue() || '-')
+                  : translate('pageRootCustomHint')),
+            ),
+          ),
+        )
+      }
+
+      return h('div', { className: 'dsdel-page' }, children)
     }
 
     // --- plugin ------------------------------------------------------------------
 
     function apply(ctx) {
       ensureStyle()
+      // Capability bits other plugins read. Announced before any slot registers,
+      // so a relocate plugin that boots after this one finds it in place; the
+      // event covers the reverse order.
+      if (typeof window !== 'undefined') {
+        window.__DSH_DELETE_SESSION__ = { supportsBulkMove: true }
+        try {
+          if (typeof window.dispatchEvent === 'function' && typeof window.Event === 'function') {
+            window.dispatchEvent(new window.Event('dsh-session-delete:ready'))
+          }
+        } catch {
+          // a host without DOM events still reads the global
+        }
+      }
 
       sessionsSvc = ctx.get('sessions') || null
       if (!sessionsSvc) {
@@ -810,6 +1748,12 @@ window.__ModuleLoader__.load({
         slots.inject('shell.overlay', () => slots.register(
           { name: 'shell.overlay', id: `${NS}-dialog`, locale: NS },
           DeleteSessionDialog,
+        ))
+        // The save-path picker is a second overlay: the settings card cannot host
+        // a modal of its own.
+        slots.inject('shell.overlay', () => slots.register(
+          { name: 'shell.overlay', id: `${NS}-picker`, order: 1, locale: NS },
+          QuarantinePicker,
         ))
         // The plugin page card.
         slots.inject('plugins.row.config', () => slots.register(

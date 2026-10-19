@@ -299,7 +299,30 @@ async function loadPlugin(options = {}) {
   }
   globalThis.cancelAnimationFrame = (id) => { rafQueue.delete(id) }
   globalThis.fetch = async (url, init) => {
-    requests.push({ url: String(url), init })
+    const href = String(url)
+    requests.push({ url: href, init })
+    // The artifact scan answers with whatever plan the test supplied; every
+    // other route answers with a bare success.
+    if (href.endsWith('/dsh-delete-session/artifacts')) {
+      const plan = options.plan ?? { created: [], modified: [], refused: [], truncated: false, warnings: [] }
+      return { ok: true, status: 200, json: async () => ({ ok: true, ...plan }) }
+    }
+    // The folder picker asks for one directory listing per navigation.
+    if (href.endsWith('/dsh-delete-session/browse')) {
+      const asked = JSON.parse((init && init.body) || '{}')
+      const fallback = { path: 'C:/ws', parent: 'C:/', entries: [], roots: [], truncated: false, defaultRoot: 'C:/home' }
+      const listing = typeof options.browse === 'function' ? options.browse(asked.path) : (options.browse ?? fallback)
+      return { ok: true, status: 200, json: async () => ({ ok: true, ...listing }) }
+    }
+    // The native dialog route. `unsupported` models a platform without one, which
+    // is what makes the client fall back to the in-page picker.
+    if (href.endsWith('/dsh-delete-session/pick')) {
+      const pick = options.pick ?? { cancelled: true, path: null }
+      if (pick.unsupported === true) {
+        return { ok: false, status: 501, json: async () => ({ ok: false, code: 'unsupported', error: '系统文件夹对话框只支持 Windows' }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, ...pick }) }
+    }
     return { ok: true, status: 200, json: async () => ({ ok: true }) }
   }
 
@@ -317,9 +340,16 @@ async function loadPlugin(options = {}) {
   const locales = {}
   const localeStub = {
     register: (namespace, dictionaries) => { locales[namespace] = dictionaries },
-    translate: (namespace, key) => {
+    // Mirrors dsh-client-locale: a non-string entry is handed back untouched, and
+    // only string templates interpolate `{name}` from a params object. Returning
+    // a function as-is is exactly what makes the plugin fall back to its own
+    // dictionary, which is how parameterised strings keep their arguments.
+    translate: (namespace, key, params) => {
       const value = locales[namespace]?.zh?.[key]
-      return typeof value === 'function' ? value() : value ?? key
+      if (value === undefined) return key
+      if (typeof value !== 'string') return value
+      if (!params) return value
+      return value.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
     },
   }
 
@@ -852,15 +882,40 @@ test('residue left by an older build is swept away by the next pass', async () =
   assert.equal(row.querySelectorAll(':scope > .dsdel-check').length, 0)
 })
 
-// --- the plugin page: "ask before deleting" (slot plugins.row.config) -------
+// --- the plugin page: artifact + ask settings (slot plugins.row.config) -----
+
+const OFF_KEY = 'dsh-delete-session:artifacts-off'
+const AUTO_KEY = 'dsh-delete-session:artifacts-auto'
+const SCOPE_KEY = 'dsh-delete-session:artifact-scope'
 
 const rowConfig = (harness) =>
   harness.slotRegistrations.find((entry) => entry.spec.name === 'plugins.row.config') ?? null
 // The registration carries no `locale`, so the host injects no `t` into this
 // entry. Rendering it exactly that way is what keeps the module-level fallback
 // honest - a card that only worked with an injected `t` would crash in the app.
-const pageCheckbox = (harness, view = 'page') =>
-  rowConfig(harness).Component({ view }).props.children[0]
+const pageCard = (harness, view = 'page') => rowConfig(harness).Component({ view })
+// The settings belonging to the master switch live in a nested container, so the
+// walk descends into any element that carries a children list.
+const collectChecks = (nodes, harness, out = []) => {
+  for (const node of nodes || []) {
+    if (node === null || node === undefined) continue
+    if (node.type === harness.primitives.Checkbox) out.push(node)
+    else if (node.props && Array.isArray(node.props.children)) collectChecks(node.props.children, harness, out)
+  }
+  return out
+}
+const pageChecks = (harness) => collectChecks(pageCard(harness).props.children, harness)
+const pageCheckbox = (harness) => pageChecks(harness)[0]
+const offCheckbox = (harness) => pageChecks(harness)[1]
+const autoCheckbox = (harness) => pageChecks(harness)[2]
+const scopeCreatedCheckbox = (harness) => pageChecks(harness)[3]
+const scopeAllCheckbox = (harness) => pageChecks(harness)[4]
+
+/** The body the delete route received, or null when it was never called. */
+const deleteBody = (harness) => {
+  const entry = harness.requests.find((call) => call.url === '/dsh-delete-session/delete')
+  return entry === undefined ? null : JSON.parse(entry.init.body)
+}
 
 test('the plugin page registers a row.config entry under the bundle#row key', async () => {
   const harness = await loadPlugin()
@@ -869,12 +924,19 @@ test('the plugin page registers a row.config entry under the bundle#row key', as
   assert.equal(entry.spec.key, 'dsh-delete-session#dsh-delete-session')
 })
 
-test('the row.config summary reflects the ask state', async () => {
+test('the row.config summary reports the artifact settings, not the ask toggle', async () => {
   const harness = await loadPlugin()
-  assert.equal(rowConfig(harness).Component({ view: 'summary' }), '删除前询问')
+  // The produced-files feature ships off, so that is what the summary says.
+  assert.equal(pageCard(harness, 'summary'), '不处理产出文件')
+
   localStorage.setItem(SKIP_KEY, '1')
-  assert.equal(rowConfig(harness).Component({ view: 'summary' }), '直接删除')
+  assert.equal(pageCard(harness, 'summary'), '不处理产出文件', 'the ask toggle no longer drives the summary')
   localStorage.removeItem(SKIP_KEY)
+
+  localStorage.setItem(OFF_KEY, '0')
+  assert.equal(pageCard(harness, 'summary'), '产出文件先询问')
+  localStorage.setItem(AUTO_KEY, '1')
+  assert.equal(pageCard(harness, 'summary'), '产出文件自动隔离')
 })
 
 test('the page checkbox starts ticked and unticking it deletes without a dialog', async () => {
@@ -927,4 +989,823 @@ test('ticking don\'t-ask-again and then cancelling changes nothing', async () =>
   assert.equal(localStorage.getItem(SKIP_KEY), null, 'the preference was never committed')
   assert.equal(dialogElement(harness), null, 'the dialog closed')
   assert.equal(harness.requests.length, 0, 'and nothing was deleted')
+})
+
+// --- produced files: the opt-in feature -------------------------------------
+
+const PLAN = {
+  created: [
+    { path: 'C:/ws/new-a.md', displayPath: 'C:/ws/new-a.md', ops: 1 },
+    { path: 'C:/ws/new-b.md', displayPath: 'C:/ws/new-b.md', ops: 1 },
+  ],
+  modified: [
+    { path: 'C:/ws/old-c.md', displayPath: 'C:/ws/old-c.md', ops: 2 },
+  ],
+  refused: [{ path: 'C:/elsewhere/x.md', reason: '不在该对话的工作目录内，已跳过' }],
+  truncated: false,
+  warnings: [],
+}
+
+/** The artifact section's rendered element, or null when it is absent. */
+const artifactSection = (harness) => {
+  const modal = dialogElement(harness)
+  if (modal === null || modal === undefined) return null
+  const kids = modal.props.children || []
+  // The `createElement` stub keeps `key` inside props, the way the rest of this
+  // file reads it.
+  return kids.find((node) => node && node.props && node.props.key === 'artifacts') ?? null
+}
+
+/** One rendered tick row per listed artifact. */
+const artifactRows = (harness) => {
+  const section = artifactSection(harness)
+  if (section === null) return []
+  return (section.props.children || []).filter((node) => node && node.type === 'label')
+}
+
+const artifactInputs = (harness) => artifactRows(harness).map((label) => label.props.children[0])
+
+/** Open the dialog through the real menu row and let the scan settle. */
+async function openArtifactDialog(harness, session = SESSION_A) {
+  const { element } = deleteRow(harness, session)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await tick()
+  return dialogParts(harness)
+}
+
+test('the produced-files feature ships off: no scan, no section, no quarantine field', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  mountRow(harness, SESSION_A)
+  const parts = await openArtifactDialog(harness)
+
+  assert.ok(parts, 'the dialog opened')
+  assert.equal(artifactSection(harness), null, 'no artifact section while the feature is off')
+  assert.equal(
+    harness.requests.filter((call) => call.url === '/dsh-delete-session/artifacts').length,
+    0,
+    'no scan was requested',
+  )
+
+  parts.confirm.props.onClick()
+  await tick()
+  const body = deleteBody(harness)
+  assert.equal(body.sessionId, SESSION_A.id)
+  assert.equal('quarantine' in body, false, 'the delete request is byte-identical to the previous version')
+})
+
+test('the page hides the artifact sub-controls while the master switch is on', async () => {
+  const harness = await loadPlugin()
+  assert.equal(pageChecks(harness).length, 2, 'only the ask toggle and the master switch render')
+  assert.equal(offCheckbox(harness).props.checked, true, 'the master switch starts ticked')
+})
+
+test('clearing the master switch reveals the auto and scope controls', async () => {
+  const harness = await loadPlugin()
+  offCheckbox(harness).props.onChange(false)
+
+  assert.equal(localStorage.getItem(OFF_KEY), '0', 'the opt-in was stored')
+  assert.equal(pageChecks(harness).length, 6, 'the sub-controls render once enabled')
+  assert.equal(autoCheckbox(harness).props.checked, false, 'asking is the default once enabled')
+  assert.equal(scopeCreatedCheckbox(harness).props.checked, true, 'created-only is the default scope')
+  assert.equal(scopeAllCheckbox(harness).props.checked, false)
+})
+
+test('the scope controls are mutually exclusive', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+
+  scopeAllCheckbox(harness).props.onChange(true)
+  assert.equal(localStorage.getItem(SCOPE_KEY), 'all')
+  assert.equal(scopeAllCheckbox(harness).props.checked, true)
+  assert.equal(scopeCreatedCheckbox(harness).props.checked, false)
+
+  scopeCreatedCheckbox(harness).props.onChange(true)
+  assert.equal(localStorage.getItem(SCOPE_KEY), 'created')
+  assert.equal(scopeCreatedCheckbox(harness).props.checked, true)
+
+  // Unticking never clears the selection: one scope is always in force.
+  scopeCreatedCheckbox(harness).props.onChange(false)
+  assert.equal(localStorage.getItem(SCOPE_KEY), 'created')
+})
+
+test('with the feature on the dialog scans and lists the created files', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+
+  const parts = await openArtifactDialog(harness)
+  assert.ok(parts, 'the dialog opened')
+  assert.equal(
+    harness.requests.filter((call) => call.url === '/dsh-delete-session/artifacts').length,
+    1,
+    'exactly one scan went out',
+  )
+  assert.ok(artifactSection(harness), 'the artifact section rendered')
+  assert.equal(artifactRows(harness).length, 2, 'the created-only scope lists two rows')
+  assert.equal(artifactInputs(harness).every((input) => input.props.checked === true), true, 'all preselected')
+})
+
+test('ask mode sends the ticked paths and drops the unticked ones', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+
+  const parts = await openArtifactDialog(harness)
+  artifactInputs(harness)[0].props.onChange({ target: { checked: false } })
+
+  parts.confirm.props.onClick()
+  await tick()
+
+  const body = deleteBody(harness)
+  assert.equal(body.quarantine.scope, 'created')
+  assert.deepEqual(body.quarantine.paths, ['C:/ws/new-b.md'], 'only the still-ticked row was sent')
+})
+
+test('auto mode sends only the scope so the host takes its own full set', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '1')
+  mountRow(harness, SESSION_A)
+
+  const parts = await openArtifactDialog(harness)
+  assert.equal(artifactRows(harness).length, 0, 'auto mode renders no tick rows')
+
+  parts.confirm.props.onClick()
+  await tick()
+
+  const body = deleteBody(harness)
+  assert.deepEqual(body.quarantine, { scope: 'created', skipGit: true }, 'no path list is sent in auto mode')
+})
+
+test('the "created and changed" scope lists and sends the changed rows too', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(SCOPE_KEY, 'all')
+  mountRow(harness, SESSION_A)
+
+  const parts = await openArtifactDialog(harness)
+  assert.equal(artifactRows(harness).length, 3, 'created rows plus the changed row')
+
+  parts.confirm.props.onClick()
+  await tick()
+
+  const body = deleteBody(harness)
+  assert.equal(body.quarantine.scope, 'all')
+  assert.deepEqual(
+    [...body.quarantine.paths].sort(),
+    ['C:/ws/new-a.md', 'C:/ws/new-b.md', 'C:/ws/old-c.md'].sort(),
+  )
+})
+
+test('a scan failure is shown in the dialog and still allows a plain delete', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+
+  // Break only the scan route.
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/artifacts')) {
+      harness.requests.push({ url: String(url), init })
+      return { ok: false, status: 500, json: async () => ({ ok: false, error: 'boom' }) }
+    }
+    return originalFetch(url, init)
+  }
+
+  const parts = await openArtifactDialog(harness)
+  const section = artifactSection(harness)
+  assert.ok(section, 'the section is still rendered')
+  assert.equal(section.props.role, 'alert', 'the failure is announced')
+
+  parts.confirm.props.onClick()
+  await tick()
+  const body = deleteBody(harness)
+  // The plan never loaded, so nothing may be quarantined by accident.
+  assert.deepEqual(body.quarantine, { scope: 'created', paths: [], skipGit: true })
+})
+
+// --- the two "don't ask again" paths must not silently skip the feature ------
+
+test('ask mode keeps the dialog when asking was turned off, so the list is never skipped', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')   // produced-files on
+  localStorage.setItem(SKIP_KEY, '1')  // "don't ask again" on
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await tick()
+
+  // The file list only exists in the dialog, so skipping it would make the
+  // feature do nothing at all - worse than either asking or not.
+  assert.ok(dialogElement(harness), 'the dialog still opens')
+  assert.ok(artifactSection(harness), 'with the file list in it')
+  assert.equal(deleteBody(harness), null, 'and nothing was deleted behind the user')
+})
+
+test('auto mode with asking turned off deletes straight away and still quarantines', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '1')
+  localStorage.setItem(SKIP_KEY, '1')
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+
+  assert.equal(dialogElement(harness), null, 'no dialog in auto mode')
+  const body = deleteBody(harness)
+  assert.ok(body, 'the delete went out')
+  assert.deepEqual(body.quarantine, { scope: 'created' }, 'the feature is not silently skipped')
+})
+
+// --- the configurable save path ---------------------------------------------
+
+const ROOT_KEY = 'dsh-delete-session:quarantine-root'
+
+/** Depth-first search for rendered elements carrying one key. */
+const findByKey = (nodes, key, out = []) => {
+  for (const node of nodes || []) {
+    if (!node || !node.props) continue
+    if (node.props.key === key) {
+      out.push(node)
+      continue
+    }
+    if (Array.isArray(node.props.children)) findByKey(node.props.children, key, out)
+  }
+  return out
+}
+const pageRootInput = (harness) => findByKey(pageCard(harness).props.children, 'rootInput')[0]
+const pageRootReset = (harness) => findByKey(pageCard(harness).props.children, 'reset')[0]
+const pageRootBrowse = (harness) => findByKey(pageCard(harness).props.children, 'browse')[0]
+
+const browseRequests = (harness) =>
+  harness.requests.filter((call) => call.url === '/dsh-delete-session/browse')
+const artifactsBody = (harness) => {
+  const entry = harness.requests.find((call) => call.url === '/dsh-delete-session/artifacts')
+  return entry === undefined ? null : JSON.parse(entry.init.body)
+}
+
+const pickerEntry = (harness) =>
+  harness.slotRegistrations.find((entry) => entry.spec.id === 'dsh-delete-session-picker') ?? null
+const pickerElement = (harness) => pickerEntry(harness).Component({ t: harness.t })
+
+test('the settings card defaults to the host path and names it', async () => {
+  const harness = await loadPlugin({
+    browse: { path: 'C:/home', parent: null, entries: [], roots: [], truncated: false, defaultRoot: 'C:/home' },
+  })
+  localStorage.setItem(OFF_KEY, '0')
+
+  const input = pageRootInput(harness)
+  assert.ok(input, 'the field renders with the feature on')
+  assert.equal(input.props.value, '', 'an empty value means "use the host default"')
+
+  // The host default arrives from the picker route, so the first render only
+  // arms the request; the placeholder names it once that settles.
+  await tick()
+  await tick()
+  assert.equal(pageRootInput(harness).props.placeholder, 'C:/home')
+
+  assert.equal(localStorage.getItem(ROOT_KEY), null, 'nothing is stored until the user chooses')
+})
+
+test('a typed save path is stored and sent with the scan and the delete', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+
+  pageRootInput(harness).props.onChange({ target: { value: 'D:\\quarantine' } })
+  assert.equal(localStorage.getItem(ROOT_KEY), 'D:\\quarantine')
+
+  const parts = await openArtifactDialog(harness)
+  assert.equal(artifactsBody(harness).root, 'D:\\quarantine', 'the scan knows where files would go')
+
+  parts.confirm.props.onClick()
+  await tick()
+  assert.equal(deleteBody(harness).root, 'D:\\quarantine', 'and so does the delete')
+})
+
+test('"use default" clears the stored path and omits it from the requests', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(ROOT_KEY, 'D:\\quarantine')
+  mountRow(harness, SESSION_A)
+
+  pageRootReset(harness).props.onClick()
+  assert.equal(localStorage.getItem(ROOT_KEY), null, 'the override is gone')
+
+  const parts = await openArtifactDialog(harness)
+  assert.equal('root' in artifactsBody(harness), false, 'the scan falls back to the default')
+
+  parts.confirm.props.onClick()
+  await tick()
+  assert.equal('root' in deleteBody(harness), false, 'and so does the delete')
+})
+
+test('the browse button opens a picker that walks directories and commits one', async () => {
+  const listing = (target) => {
+    if (target === 'C:/ws') {
+      return {
+        path: 'C:/ws',
+        parent: 'C:/',
+        entries: [{ name: 'keep', path: 'C:/ws/keep' }, { name: 'other', path: 'C:/ws/other' }],
+        roots: [],
+        truncated: false,
+        defaultRoot: 'C:/home',
+      }
+    }
+    return { path: target, parent: 'C:/ws', entries: [], roots: [], truncated: false, defaultRoot: 'C:/home' }
+  }
+  // No native dialog on this platform, so the in-page picker is the fallback.
+  const harness = await loadPlugin({ browse: listing, pick: { unsupported: true } })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(ROOT_KEY, 'C:/ws')
+
+  pageRootBrowse(harness).props.onClick()
+  await tick()
+  await tick()
+
+  const modal = pickerElement(harness)
+  assert.ok(modal, 'the picker opened')
+  const rows = findByKey(modal.props.children || [], 'C:/ws/keep')
+  assert.equal(rows.length, 1, 'the folders are listed')
+
+  // Walking into a folder re-asks the host.
+  rows[0].props.onClick()
+  await tick()
+  await tick()
+  assert.equal(browseRequests(harness).at(-1).init.body, JSON.stringify({ path: 'C:/ws/keep' }))
+  assert.equal(pickerElement(harness).props.children.length > 0, true, 'the listing re-rendered')
+
+  // Committing writes the preference and closes the picker.
+  const footer = pickerElement(harness).props.footer
+  footer[1].props.onClick()
+  assert.equal(localStorage.getItem(ROOT_KEY), 'C:/ws/keep', 'the chosen folder is stored')
+  assert.equal(pickerElement(harness), null, 'the picker closed')
+})
+
+// --- dsh-session-relocate integration ---------------------------------------
+//
+// That plugin publishes a bulk-move face on `window`. When it is there, one more
+// button appears between cancel and delete; when it is not, the bar is exactly
+// what it was before and no other logic changes.
+
+const barButtons = (harness) => bar(harness).querySelectorAll('.dsdel-bar-btn')
+const barMove = (harness) => bar(harness).querySelector('.dsdel-bar-move')
+const barCancel = (harness) => bar(harness).querySelector('.dsdel-bar-cancel')
+const barDelete = (harness) => bar(harness).querySelector('.dsdel-bar-danger')
+const barCount = (harness) => bar(harness).querySelector('.dsdel-bar-count')
+const toasts = (harness) => harness.document.querySelectorAll('.dsdel-toast').map((el) => el.textContent)
+
+function installRelocate(moveSelection) {
+  globalThis.window.__DSH_SESSION_RELOCATE__ = { version: '0.2.0', supportsBulkMove: true, moveSelection }
+}
+
+async function enterMulti(harness) {
+  selectRow(harness).element.props.onSelect()
+  await flush()
+}
+
+function clickRowIn(harness, row) {
+  harness.document.dispatchToDocument('click', { target: row, preventDefault() {}, stopPropagation() {} })
+}
+
+test('without dsh-session-relocate the bar keeps exactly cancel and delete', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+
+  assert.equal(barMove(harness), null, 'no move button is offered')
+  assert.deepEqual(barButtons(harness).map((el) => el.textContent), ['取消', '删除'])
+})
+
+test('a relocate plugin that does not claim bulk move changes nothing', async () => {
+  const harness = await loadPlugin()
+  globalThis.window.__DSH_SESSION_RELOCATE__ = { version: '0.2.0', supportsBulkMove: false, moveSelection: async () => ({}) }
+  mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  assert.deepEqual(barButtons(harness).map((el) => el.textContent), ['取消', '删除'])
+})
+
+test('with dsh-session-relocate the move button sits between cancel and delete', async () => {
+  const harness = await loadPlugin()
+  installRelocate(async (ids) => ({ moved: 0, failed: 0, skipped: 0, total: ids.length, results: [] }))
+  mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+
+  assert.deepEqual(barButtons(harness).map((el) => el.textContent), ['取消', '移动', '删除'], 'left to right')
+})
+
+test('the move button is disabled until something is selected', async () => {
+  const harness = await loadPlugin()
+  installRelocate(async (ids) => ({ moved: 0, failed: 0, skipped: 0, total: ids.length, results: [] }))
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+
+  assert.equal(barMove(harness).disabled, true, 'nothing selected')
+  assert.equal(barDelete(harness).disabled, true, 'and delete agrees')
+  assert.equal(barCancel(harness).disabled, false, 'cancel is always live')
+
+  clickRowIn(harness, first)
+  await flush()
+  assert.equal(barMove(harness).disabled, false, 'one selection is enough')
+})
+
+test('a move reports progress, then summarises, exits and refreshes', async () => {
+  const harness = await loadPlugin()
+  let seen = null
+  let finish
+  const done = new Promise((resolve) => { finish = resolve })
+  installRelocate(async (ids, hooks) => {
+    seen = { ids, hooks }
+    return done
+  })
+
+  const first = mountRow(harness, SESSION_A)
+  const second = mountRow(harness, SESSION_B)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  clickRowIn(harness, second)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+
+  assert.deepEqual(seen.ids, [SESSION_A.id, SESSION_B.id], 'the whole selection is handed over')
+  assert.equal(barCount(harness).textContent, '正在移动 0/2…')
+  assert.equal(barMove(harness).disabled, true, 'inert while the move runs')
+  assert.equal(barDelete(harness).disabled, true)
+
+  seen.hooks.onProgress(1, 2)
+  assert.equal(barCount(harness).textContent, '正在移动 1/2…')
+
+  finish({ moved: 2, failed: 0, skipped: 0, total: 2, results: [] })
+  await flush()
+  await flush()
+
+  assert.deepEqual(toasts(harness), ['已移动 2 个'], 'one summary line')
+  assert.notEqual(bar(harness).style.display, 'flex', 'multi-select exited')
+})
+
+test('a partial move reports both numbers', async () => {
+  const harness = await loadPlugin()
+  installRelocate(async (ids) => ({ moved: 1, failed: 2, skipped: 0, total: ids.length, results: [] }))
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+  await flush()
+
+  assert.deepEqual(toasts(harness), ['已移动 1 个 / 2 个失败'])
+})
+
+test('cancelling the target picker keeps the selection and says nothing', async () => {
+  const harness = await loadPlugin()
+  installRelocate(async () => ({ canceled: true }))
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+  await flush()
+
+  assert.deepEqual(toasts(harness), [], 'nothing happened, so nothing is reported')
+  assert.equal(bar(harness).style.display, 'flex', 'multi-select is still open')
+  assert.equal(barCount(harness).textContent, '已选 1 个', 'the count is back')
+  assert.equal(barMove(harness).disabled, false, 'the retry is available')
+})
+
+test('a throwing relocate call ends the batch and reports the error', async () => {
+  const harness = await loadPlugin()
+  installRelocate(async () => { throw new Error('relocate exploded') })
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+  await flush()
+
+  assert.equal(bar(harness).style.display, 'flex', 'still in multi-select')
+  assert.equal(toasts(harness).length, 1, 'the failure is reported')
+  assert.match(toasts(harness)[0], /relocate exploded/)
+})
+
+test('Escape stays inert while a move is running', async () => {
+  const harness = await loadPlugin()
+  let finish
+  installRelocate(async () => new Promise((resolve) => { finish = resolve }))
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+
+  harness.document.dispatchToDocument('keydown', { key: 'Escape', stopPropagation() {} })
+  await flush()
+  assert.equal(bar(harness).style.display, 'flex', 'Escape is ignored mid-move')
+
+  finish({ moved: 1, failed: 0, skipped: 0, total: 1, results: [] })
+  await flush()
+  await flush()
+  assert.notEqual(bar(harness).style.display, 'flex', 'and the mode ends when the move does')
+})
+
+// --- the result contract is enforced, not guessed ---------------------------
+
+test('the older "cancelled" spelling of the cancel flag is still honoured', async () => {
+  const harness = await loadPlugin()
+  installRelocate(async () => ({ cancelled: true }))
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+  await flush()
+
+  assert.deepEqual(toasts(harness), [], 'silent, exactly like the "canceled" spelling')
+  assert.equal(bar(harness).style.display, 'flex', 'still in multi-select')
+})
+
+test('a result without the agreed counts is reported instead of guessed', async () => {
+  const harness = await loadPlugin()
+  // The shape an earlier draft used: no total. Substituting `total - failed` would
+  // make "genuinely zero failures" and "field missing" look identical.
+  installRelocate(async () => ({ moved: 1, failed: 0 }))
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  barMove(harness).fire('click', { stopPropagation() {} })
+  await flush()
+  await flush()
+
+  assert.equal(toasts(harness).length, 1)
+  assert.match(toasts(harness)[0], /移动结果缺少字段：total/)
+})
+
+// --- capability bits --------------------------------------------------------
+
+test('the plugin announces itself so a relocate plugin can stand down', async () => {
+  await loadPlugin()
+  assert.equal(globalThis.window.__DSH_DELETE_SESSION__?.supportsBulkMove, true, 'the capability bit is set')
+})
+
+// --- the hint under "ask before deleting" must match what actually happens ---
+
+const pageHint = (harness, key) => findByKey(pageCard(harness).props.children, key)[0]
+
+test('with asking off, the hint changes when the file list still needs a dialog', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(SKIP_KEY, '1')
+
+  // Feature off: nothing else opens a dialog, so "delete straight away" is true.
+  assert.equal(pageHint(harness, 'askHint').props.children, '删除会话会直接执行，不再询问。')
+
+  // Feature on in ask mode: the list lives in the dialog, so it still opens.
+  localStorage.setItem(OFF_KEY, '0')
+  assert.equal(
+    pageHint(harness, 'askHint').props.children,
+    '删除会话仍会弹窗——产出文件要先列清单给你勾选。',
+    'the promise must match the behaviour',
+  )
+
+  // Feature on in auto mode: no list to show, so straight delete is true again.
+  localStorage.setItem(AUTO_KEY, '1')
+  assert.equal(pageHint(harness, 'askHint').props.children, '删除会话会直接执行，不再询问。')
+})
+
+test('with asking on, the hint is the plain confirmation one', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  assert.equal(pageHint(harness, 'askHint').props.children, '每次删除会话前都会弹出确认框。')
+})
+
+// --- the native folder dialog -----------------------------------------------
+//
+// The browser cannot hand a page a filesystem path, so the host raises the OS
+// dialog instead. The in-page picker stays as the fallback for platforms without
+// one, which the test above already covers.
+
+test('the folder button stores what the system dialog returned', async () => {
+  const harness = await loadPlugin({ pick: { cancelled: false, path: 'D:/quarantine' } })
+  localStorage.setItem(OFF_KEY, '0')
+
+  pageRootBrowse(harness).props.onClick()
+  await tick()
+  await tick()
+
+  assert.equal(localStorage.getItem(ROOT_KEY), 'D:/quarantine', 'the chosen folder is stored')
+  assert.deepEqual(toasts(harness), ['已打开系统文件夹对话框，请在弹出的窗口里选择', '保存位置已更新'])
+})
+
+test('cancelling the system dialog changes nothing', async () => {
+  const harness = await loadPlugin({ pick: { cancelled: true, path: null } })
+  localStorage.setItem(OFF_KEY, '0')
+
+  pageRootBrowse(harness).props.onClick()
+  await tick()
+  await tick()
+
+  assert.equal(localStorage.getItem(ROOT_KEY), null, 'no choice was recorded')
+  assert.deepEqual(toasts(harness), ['已打开系统文件夹对话框，请在弹出的窗口里选择'], 'only the "it opened" note')
+  assert.equal(pickerElement(harness), null, 'and no fallback picker was raised')
+})
+
+test('a failing system dialog is reported, not swallowed', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/dsh-delete-session/pick')) {
+      harness.requests.push({ url: String(url), init })
+      return { ok: false, status: 500, json: async () => ({ ok: false, code: 'shell', error: 'shell exploded' }) }
+    }
+    return originalFetch(url, init)
+  }
+
+  pageRootBrowse(harness).props.onClick()
+  await tick()
+  await tick()
+
+  assert.equal(localStorage.getItem(ROOT_KEY), null)
+  assert.match(toasts(harness).at(-1), /shell exploded/)
+})
+
+// --- the dialog must not pay for work it cannot use --------------------------
+
+const scans = (harness) => harness.requests.filter((entry) => String(entry.url).includes('/artifacts'))
+
+test('auto mode never scans, because the answer is thrown away', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '1')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  assert.equal(scans(harness).length, 0, 'quarantine is sent as { scope } and the host derives the set')
+  assert.ok(dialogParts(harness), 'the dialog still opens straight away')
+})
+
+test('ask mode still scans, because its list is the whole point', async () => {
+  const harness = await loadPlugin({
+    plan: { created: [{ path: 'C:/ws/a.md', displayPath: 'a.md' }], modified: [], refused: [], truncated: false },
+  })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem(OFF_KEY, '0')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  assert.equal(scans(harness).length, 1, 'the listing is what the user ticks')
+})
+
+test('the counts render as numbers, not as the dictionary function', async () => {
+  // The locale contract hands a function entry back untouched; rendering it
+  // without calling it printed "(created, modified) => ..." into the dialog.
+  // `harness.t` deliberately calls such entries so ordinary tests can read text,
+  // so the contract path is driven here with a translator that behaves like the
+  // host's: strings (interpolated) or the raw entry, nothing else.
+  const hostTranslator = (key) => {
+    const value = harness.locales[NS]?.zh?.[key]
+    return value === undefined ? key : value
+  }
+  const harness = await loadPlugin({
+    plan: {
+      created: [{ path: 'C:/ws/a.md', displayPath: 'a.md' }, { path: 'C:/ws/b.md', displayPath: 'b.md' }],
+      modified: [{ path: 'C:/ws/c.md', displayPath: 'c.md' }],
+      refused: [],
+      truncated: false,
+    },
+  })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem(OFF_KEY, '0')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  const modal = overlayEntry(harness).Component({ t: hostTranslator })
+  const kids = modal.props.children.filter(Boolean)
+  const artifactsNode = kids.find((node) => node.props.key === 'artifacts')
+  const countNode = artifactsNode.props.children.find((node) => node.props.key === 'count')
+
+  assert.equal(typeof countNode.props.children, 'string', 'the count is text, not a function')
+  assert.match(countNode.props.children, /新建 2 个 · 改过 1 个/)
+})
+
+// --- the dialog must not threaten a deletion it no longer performs -----------
+
+test('the dialog says the session goes to the Recycle Bin, not that it is gone forever', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+
+  const desc = dialogParts(harness).desc
+  assert.match(desc, /回收站/, 'the Recycle Bin is named as the destination')
+  assert.doesNotMatch(desc, /永久删除/, 'it is no longer a permanent delete')
+  assert.doesNotMatch(desc, /不可恢复/, 'and it no longer claims to be unrecoverable')
+})
+
+test('the folder row can open the quarantine folder in the file manager', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(ROOT_KEY, 'D:/quarantine')
+
+  const openButton = findByKey(pageCard(harness).props.children, 'open')[0]
+  assert.ok(openButton, 'an open button sits beside the folder buttons')
+
+  openButton.props.onClick()
+  await tick()
+  await tick()
+
+  const reveal = harness.requests.filter((call) => call.url === '/dsh-delete-session/reveal')
+  assert.equal(reveal.length, 1, 'one reveal request went out')
+  assert.equal(JSON.parse(reveal[0].init.body).path, 'D:/quarantine')
+  assert.match(toasts(harness).at(-1), /已在文件管理器中打开/)
+})
+
+test('opening with no stored root falls back to the host default', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  // The default path is fetched on the first render; mount, then let it settle.
+  pageCard(harness)
+  await tick()
+  await tick()
+
+  const openButton = findByKey(pageCard(harness).props.children, 'open')[0]
+  openButton.props.onClick()
+  await tick()
+  await tick()
+
+  const reveal = harness.requests.filter((call) => call.url === '/dsh-delete-session/reveal')
+  assert.equal(reveal.length, 1)
+  assert.equal(JSON.parse(reveal[0].init.body).path, 'C:/home', 'the default the host reported is used')
+})
+
+// --- the git switch ---------------------------------------------------------
+
+const SKIP_GIT_KEY = 'dsh-delete-session:skip-git'
+
+test('skipping git repositories is on by default', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+
+  const box = findByKey(pageCard(harness).props.children, 'skipGit')[0]
+  assert.ok(box, 'the switch renders with the artifact controls')
+  assert.equal(box.props.checked, true, 'it starts on, so a project is never carried away by default')
+  assert.equal(box.props.label, '跳过 git 仓库内的文件')
+})
+
+test('turning the git switch off is stored and sent with the delete', async () => {
+  const harness = await loadPlugin({ plan: { created: [{ path: 'C:/ws/a.md', displayPath: 'a.md' }], modified: [], refused: [], truncated: false } })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+
+  const box = findByKey(pageCard(harness).props.children, 'skipGit')[0]
+  box.props.onChange(false)
+  assert.equal(localStorage.getItem(SKIP_GIT_KEY), '0', 'the choice is remembered')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+  // The dialog is open (ask mode is the default), so the delete goes out on confirm.
+  dialogParts(harness).confirm.props.onClick()
+  await flush()
+
+  assert.equal(deleteBody(harness).quarantine.skipGit, false, 'the host is told to stop skipping')
+})
+
+test('the scan itself is told whether to skip git files', async () => {
+  // The listing and the move must agree: a file hidden by the scan would
+  // otherwise still be a candidate when the host derives the set itself.
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  assert.equal(artifactsBody(harness).skipGit, true, 'the scan carries the flag')
 })
