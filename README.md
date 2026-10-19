@@ -131,8 +131,6 @@ node test/checkbox.dom.test.js     # 67 项，客户端半
 
 ### 已知限制
 
-- **取消勾选「删除至回收站」后不可恢复**，没有撤销
-- **系统回收站有每盘容量上限**：超出时 Windows 会永久删除而不是报错。会话只有 KB～MB，实际碰不到
 - **macOS 首次使用会请求 Finder 自动化权限**，拒绝后文件留在暂存目录，不会假装删掉
 - 被 DSH 打开占用的会话：删除会自动等待写所有权释放（通常几秒）后完成；极少数仍被占用时提示稍后重试或重启 DSH
 - 多选勾选框仍是对会话行的 DOM 装饰，依赖宿主 `data-row-key="session:<id>"`；核心 UI 若改名，多选会静默失效（**菜单与对话框不受影响**，它们走官方槽位）
@@ -275,8 +273,6 @@ Both suites are **mutation-checked**: reverting an implementation or breaking it
 
 ### Known limitations
 
-- **Unchecking "Delete to the system trash" is not recoverable** — there is no undo
-- **The system trash has a per-volume size cap**: over it Windows deletes permanently instead of complaining. Sessions are KB–MB, so this does not come up in practice
 - **macOS asks for Finder automation permission the first time**; denied, the files stay in the staging folder rather than pretending the delete happened
 - A session the host holds open is waited for (usually seconds); in rare cases it asks you to retry or restart DSH
 - The multi-select tick is still a DOM decoration on session rows and depends on `data-row-key="session:<id>"`. If core UI renames it, multi-select goes quiet (the menu and dialog are unaffected — they use official slots)
