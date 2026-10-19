@@ -307,6 +307,11 @@ async function loadPlugin(options = {}) {
       const plan = options.plan ?? { created: [], modified: [], refused: [], truncated: false, warnings: [] }
       return { ok: true, status: 200, json: async () => ({ ok: true, ...plan }) }
     }
+    // The subagent sessions behind one conversation.
+    if (href.endsWith('/dsh-delete-session/children')) {
+      const children = options.children ?? []
+      return { ok: true, status: 200, json: async () => ({ ok: true, children }) }
+    }
     // The folder picker asks for one directory listing per navigation.
     if (href.endsWith('/dsh-delete-session/browse')) {
       const asked = JSON.parse((init && init.body) || '{}')
@@ -632,7 +637,7 @@ test('the delete row reads its session id from the host props, not from a fiber'
   element.props.onSelect({ shiftKey: false })
   const parts = dialogParts(harness)
   assert.ok(parts, 'the dialog opened for the id the host injected')
-  assert.equal(harness.requests.length, 0, 'opening the dialog sends nothing yet')
+  assert.equal(deleteCalls(harness), 0, 'opening the dialog deletes nothing yet')
 })
 
 test('shift-click forces the dialog even after asking was turned off', async () => {
@@ -651,7 +656,7 @@ test('shift-click forces the dialog even after asking was turned off', async () 
   const forced = deleteRow(harness)
   forced.element.props.onSelect({ shiftKey: true })
   assert.ok(dialogParts(harness), 'shift-click brings the dialog back')
-  assert.equal(harness.requests.length, 1, 'and still sends nothing until confirmed')
+  assert.equal(deleteCalls(harness), 1, 'and still deletes nothing until confirmed')
 })
 
 // --- the regression ---------------------------------------------------------
@@ -896,6 +901,9 @@ const rowConfig = (harness) =>
 const pageCard = (harness, view = 'page') => rowConfig(harness).Component({ view })
 // The settings belonging to the master switch live in a nested container, so the
 // walk descends into any element that carries a children list.
+/** Only the delete request itself: opening the dialog now reads one thing. */
+const deleteCalls = (harness) =>
+  harness.requests.filter((call) => call.url === '/dsh-delete-session/delete').length
 const collectChecks = (nodes, harness, out = []) => {
   for (const node of nodes || []) {
     if (node === null || node === undefined) continue
@@ -1047,7 +1055,7 @@ test('the produced-files feature ships off: no scan, no section, no quarantine f
 
 test('the page hides the artifact sub-controls while the master switch is on', async () => {
   const harness = await loadPlugin()
-  assert.equal(pageChecks(harness).length, 3, 'ask, recycle and the master switch render')
+  assert.equal(pageChecks(harness).length, 4, 'ask, recycle, subagents and the master switch render')
   assert.equal(offCheckbox(harness).props.checked, true, 'the master switch starts ticked')
 })
 
@@ -1056,7 +1064,7 @@ test('clearing the master switch reveals the auto and scope controls', async () 
   offCheckbox(harness).props.onChange(false)
 
   assert.equal(localStorage.getItem(OFF_KEY), '0', 'the opt-in was stored')
-  assert.equal(pageChecks(harness).length, 7, 'the sub-controls render once enabled')
+  assert.equal(pageChecks(harness).length, 8, 'the sub-controls render once enabled')
   assert.equal(autoCheckbox(harness).props.checked, false, 'asking is the default once enabled')
   assert.equal(scopeCreatedCheckbox(harness).props.checked, true, 'created-only is the default scope')
   assert.equal(scopeAllCheckbox(harness).props.checked, false)
@@ -1841,4 +1849,99 @@ test('unchecking it switches both the sentence and the request to a hard delete'
   dialogParts(harness).confirm.props.onClick()
   await flush()
   assert.equal(deleteBody(harness).recycle, false, 'the host is told to remove it outright')
+})
+
+// --- subagent sessions: ticked in the dialog, or taken with the parent ------
+
+const SYNC_CHILDREN_KEY = 'dsh-delete-session:sync-children'
+const CHILDREN = [
+  { id: 'session-child-one', depth: 1, cwd: 'E:\\work' },
+  { id: 'session-child-two', depth: 2, cwd: 'E:\\work' },
+]
+
+const childChecks = (harness) => {
+  const modal = dialogElement(harness)
+  if (modal === null) return []
+  const section = (modal.props.children ?? []).filter(Boolean).find((node) => node.props.key === 'children')
+  return section === undefined ? [] : collectChecks([section], harness)
+}
+
+test('the page offers to take child sessions with their parent, off by default', async () => {
+  const harness = await loadPlugin()
+  const box = pageCheck(harness, 'syncChildren')
+
+  assert.ok(box, 'the switch renders with the other delete controls')
+  assert.equal(box.props.checked, false, 'asking is the default')
+  assert.equal(box.props.label, '同时删除子会话')
+
+  box.props.onChange(true)
+  assert.equal(localStorage.getItem(SYNC_CHILDREN_KEY), '1', 'the choice is remembered')
+})
+
+test('with the switch off the dialog lists the children, ticked, for you to narrow', async () => {
+  const harness = await loadPlugin({ children: CHILDREN })
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  const checks = childChecks(harness)
+  assert.equal(checks.length, 2, 'every child is offered')
+  assert.deepEqual(checks.map((c) => c.props.checked), [true, true], 'they start ticked')
+})
+
+test('unticking a child keeps it out of the delete', async () => {
+  const harness = await loadPlugin({ children: CHILDREN })
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  childChecks(harness)[0].props.onChange(false)
+  dialogParts(harness).confirm.props.onClick()
+  await flush()
+
+  assert.deepEqual(deleteBody(harness).childSessionIds, ['session-child-two'], 'only the remaining tick is deleted')
+})
+
+test('with the switch on the children ride along without asking', async () => {
+  const harness = await loadPlugin({ children: CHILDREN })
+  localStorage.setItem(SYNC_CHILDREN_KEY, '1')
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  assert.equal(childChecks(harness).length, 0, 'no list when the switch already answered')
+
+  dialogParts(harness).confirm.props.onClick()
+  await flush()
+
+  assert.deepEqual(
+    deleteBody(harness).childSessionIds,
+    ['session-child-one', 'session-child-two'],
+    'every child goes with the parent',
+  )
+})
+
+// --- the quiet repository link at the bottom of the page --------------------
+
+test('the page ends with a quiet link to the repository', async () => {
+  const harness = await loadPlugin()
+  const card = pageCard(harness)
+  const star = findByKey(card.props.children, 'star')[0]
+
+  assert.ok(star, 'the star line renders with the card')
+  assert.match(star.props.className, /dsdel-star\b/)
+
+  const [ask, cta] = star.props.children
+  assert.equal(ask.props.children, '⭐ 顺手留颗 Star，作者能高兴一整天')
+  assert.equal(cta.type, 'a', 'the call to action is a real link')
+  assert.equal(cta.props.href, 'https://github.com/DDDMUC/dsh-delete-session')
+  assert.equal(cta.props.target, '_blank')
+  assert.equal(cta.props.rel, 'noreferrer')
+  assert.equal(cta.props.children, '行，给你一颗 Star')
 })

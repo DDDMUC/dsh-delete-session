@@ -951,3 +951,191 @@ test('the switch decides between staging for the bin and removing outright', asy
   const stagedAfterPermanent = fs.readdirSync(HOME_ROOT).filter((n) => n.startsWith('session-trash-')).length
   assert.equal(stagedAfterPermanent, stagedBeforePermanent, 'a permanent delete stages nothing')
 })
+
+// --- subagent sessions are separate sessions, linked by parentSession ------
+
+const header = (id, parentSession) => (parentSession === undefined ? { id } : { id, parentSession })
+
+function fakeContext(services) {
+  return { get: (name) => services[name] }
+}
+
+test('a delete finds the grandchildren behind a child, not just the children', () => {
+  const headers = [
+    header('session-parent'),
+    header('session-child', 'session-parent'),
+    header('session-grandchild', 'session-child'),
+  ]
+
+  const found = internals.collectDescendants(headers, 'session-parent')
+
+  assert.deepEqual(found.map((h) => h.id), ['session-child', 'session-grandchild'],
+    'parents come before their own children')
+})
+
+test('a parent link matches whether or not either id carries the prefix', () => {
+  const headers = [
+    header('session-parent'),
+    header('child-uuid', 'parent-uuid'),
+  ]
+
+  const found = internals.collectDescendants(headers, 'parent-uuid')
+
+  assert.deepEqual(found.map((h) => h.id), ['child-uuid'])
+})
+
+test('a session that names itself as its parent does not loop forever', () => {
+  const headers = [
+    header('session-parent'),
+    header('session-child', 'session-child'),
+  ]
+
+  const found = internals.collectDescendants(headers, 'session-parent')
+
+  assert.deepEqual(found, [], 'a self-parented session is not its own descendant')
+})
+
+test('an orphan is a session whose parent is gone', () => {
+  const headers = [
+    header('session-parent'),
+    header('session-kept', 'session-parent'),
+    header('session-orphan', 'session-deleted-long-ago'),
+  ]
+
+  const orphans = internals.collectOrphans(headers)
+
+  assert.deepEqual(orphans.map((h) => h.id), ['session-orphan'])
+})
+
+test('session headers come from the query service when the host has one', async () => {
+  const headers = [header('session-a'), header('session-b', 'session-a')]
+  const ctx = fakeContext({
+    sessionQuery: { listSessions: async () => headers.map((h) => ({ header: h })) },
+    sessionPersistence: { list: async () => { throw new Error('should not be reached') } },
+  })
+
+  const listed = await internals.listSessionHeaders(ctx)
+
+  assert.deepEqual(listed.map((h) => h.id), ['session-a', 'session-b'])
+})
+
+test('session headers fall back to persistence when there is no query service', async () => {
+  const headers = [header('session-a')]
+  const ctx = fakeContext({ sessionPersistence: { list: async () => headers.map((h) => ({ header: h })) } })
+
+  const listed = await internals.listSessionHeaders(ctx)
+
+  assert.deepEqual(listed.map((h) => h.id), ['session-a'])
+})
+
+test('a host that can list nothing yields no headers rather than throwing', async () => {
+  const listed = await internals.listSessionHeaders(fakeContext({}))
+  assert.deepEqual(listed, [])
+})
+
+test('the child list carries a depth so nesting is visible in the dialog', () => {
+  const headers = [
+    header('session-parent'),
+    { id: 'session-child', parentSession: 'session-parent', cwd: 'E:\\work' },
+    { id: 'session-grandchild', parentSession: 'session-child', cwd: 'E:\\work' },
+  ]
+
+  const children = internals.describeChildren(headers, 'session-parent')
+
+  assert.deepEqual(children, [
+    { id: 'session-child', depth: 1, cwd: 'E:\\work' },
+    { id: 'session-grandchild', depth: 2, cwd: 'E:\\work' },
+  ])
+})
+
+test('only the ids the user picked, and only real descendants, are deleted', () => {
+  const headers = [
+    header('session-parent'),
+    header('session-child', 'session-parent'),
+    header('session-grandchild', 'session-child'),
+    header('session-unrelated'),
+  ]
+
+  const picked = internals.selectChildDeletes(headers, 'session-parent', [
+    'session-child',
+    'session-unrelated',
+    'session-does-not-exist',
+  ])
+
+  assert.deepEqual(picked, ['session-child'], 'an unrelated id can never ride along on a delete')
+})
+
+test('a picked child is matched by its bare uuid but deleted under its own id', () => {
+  const headers = [
+    header('session-parent'),
+    header('session-grandchild', 'session-child'),
+    header('session-child', 'session-parent'),
+  ]
+
+  // The dialog may hold either spelling; the delete always uses the header's own.
+  const picked = internals.selectChildDeletes(headers, 'session-parent', ['child'])
+
+  assert.deepEqual(picked, ['session-child'], 'the bare uuid matches the prefixed id')
+  const byPrefixed = internals.selectChildDeletes(headers, 'session-parent', ['session-child'])
+  assert.deepEqual(byPrefixed, ['session-child'], 'and the prefixed one matches too')
+  const unrelated = internals.selectChildDeletes(headers, 'session-parent', ['session-grandchild-ish'])
+  assert.deepEqual(unrelated, [], 'a near miss is not a descendant')
+})
+
+test('no picked children means the parent goes alone', () => {
+  const headers = [header('session-parent'), header('session-child', 'session-parent')]
+
+  assert.deepEqual(internals.selectChildDeletes(headers, 'session-parent', undefined), [])
+  assert.deepEqual(internals.selectChildDeletes(headers, 'session-parent', []), [])
+})
+
+const PARENT_ID = 'session-22222222-2222-4222-8222-222222222222'
+const CHILD_ID = 'session-11111111-1111-4111-8111-111111111111'
+const OTHER_ID = 'session-33333333-3333-4333-8333-333333333333'
+
+/** Plant a session the way the JSONL backend lays one out, plus its cache row. */
+function plantSession(id) {
+  const dir = path.join(HOME_ROOT, 'sessions', '--tmp-work--', id)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), 'x')
+  const cache = path.join(HOME_ROOT, 'storages', 'session_projcache', 'sessions', `${id}.json`)
+  fs.mkdirSync(path.dirname(cache), { recursive: true })
+  fs.writeFileSync(cache, '{}')
+  return { dir, cache }
+}
+
+const serviceFree = { get: () => undefined }
+
+test('a delete takes the child sessions it was handed with it', async () => {
+  const parent = plantSession(PARENT_ID)
+  const child = plantSession(CHILD_ID)
+  const bystander = plantSession(OTHER_ID)
+
+  await internals.deleteSession(serviceFree, PARENT_ID, { recycle: false, childSessionIds: [CHILD_ID] })
+
+  assert.equal(fs.existsSync(parent.dir), false, 'the parent is gone')
+  assert.equal(fs.existsSync(child.dir), false, 'the ticked child went with it')
+  assert.equal(fs.existsSync(child.cache), false, 'and so did the child cache row')
+  assert.equal(fs.existsSync(bystander.dir), true, 'a session nobody ticked stays')
+})
+
+test('without a child list the parent goes alone', async () => {
+  const parent = plantSession(PARENT_ID)
+  const child = plantSession(CHILD_ID)
+
+  await internals.deleteSession(serviceFree, PARENT_ID, { recycle: false })
+
+  assert.equal(fs.existsSync(parent.dir), false)
+  assert.equal(fs.existsSync(child.dir), true, 'unticked children are left standing')
+})
+
+test('the delete reports which children failed', async () => {
+  const parent = plantSession(PARENT_ID)
+
+  const result = await internals.deleteSession(serviceFree, PARENT_ID, {
+    recycle: false,
+    childSessionIds: ['not-a-session-id'],
+  })
+
+  assert.equal(result.children.length, 0, 'an invalid id never becomes a child delete')
+})

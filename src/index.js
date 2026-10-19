@@ -66,6 +66,132 @@ function idVariants(sessionId) {
   else out.add(`session-${sessionId}`)
   return [...out]
 }
+/** The bare uuid, for comparing ids that may or may not carry the prefix. */
+function bareSessionId(sessionId) {
+  return sessionId.startsWith('session-') ? sessionId.slice('session-'.length) : sessionId
+}
+
+/**
+ * Every session header the host knows about, or `[]` when no service can list
+ * them. `sessionQuery` merges live and persisted sessions and carries
+ * `parentSession`, so the parent/child map never has to be decoded out of the
+ * zstd logs.
+ */
+async function listSessionHeaders(ctx) {
+  try {
+    const query = ctx.get('sessionQuery')
+    if (query && typeof query.listSessions === 'function') {
+      const records = await query.listSessions()
+      const headers = records
+        .map((record) => record && record.header)
+        .filter((header) => header && typeof header.id === 'string')
+      if (headers.length > 0) return headers
+    }
+  } catch {
+    // fall through to the persistence service
+  }
+  try {
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence && typeof persistence.list === 'function') {
+      const snapshots = await persistence.list({})
+      return snapshots
+        .map((snapshot) => snapshot && snapshot.header)
+        .filter((header) => header && typeof header.id === 'string')
+    }
+  } catch {
+    // no service can list sessions on this host
+  }
+  return []
+}
+
+/**
+ * Every descendant of one session, breadth first. A subagent is a session of
+ * its own — its own directory and its own log — linked only by `parentSession`,
+ * so a delete that ignores the link leaves orphans behind.
+ *
+ * @param headers - the host session headers.
+ * @param sessionId - the session being deleted.
+ * @returns descendant headers, parents before their own children.
+ */
+function collectDescendants(headers, sessionId) {
+  const byParent = new Map()
+  for (const header of headers) {
+    if (typeof header.parentSession !== 'string') continue
+    const key = bareSessionId(header.parentSession)
+    const list = byParent.get(key)
+    if (list === undefined) byParent.set(key, [header])
+    else list.push(header)
+  }
+  const found = []
+  const seen = new Set([bareSessionId(sessionId)])
+  const queue = [bareSessionId(sessionId)]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    for (const child of byParent.get(current) ?? []) {
+      const key = bareSessionId(child.id)
+      if (seen.has(key)) continue
+      seen.add(key)
+      found.push(child)
+      queue.push(key)
+    }
+  }
+  return found
+}
+
+/**
+ * Sessions whose parent no longer exists. Deleting a parent used to leave these
+ * on disk, and the sidebar cannot show the ones that never joined a workspace.
+ */
+function collectOrphans(headers) {
+  const present = new Set(headers.map((entry) => bareSessionId(entry.id)))
+  return headers.filter((entry) => typeof entry.parentSession === 'string'
+    && !present.has(bareSessionId(entry.parentSession)))
+}
+
+/**
+ * The child list the dialog shows: identity, nesting depth and the project the
+ * subagent ran in, so the names are recognisable before anything is ticked.
+ */
+function describeChildren(headers, sessionId) {
+  const byBare = new Map(headers.map((entry) => [bareSessionId(entry.id), entry]))
+  return collectDescendants(headers, sessionId).map((entry) => {
+    let depth = 1
+    let cursor = entry
+    while (typeof cursor.parentSession === 'string') {
+      const parent = byBare.get(bareSessionId(cursor.parentSession))
+      if (parent === undefined || bareSessionId(parent.id) === bareSessionId(sessionId)) break
+      depth += 1
+      cursor = parent
+    }
+    return {
+      id: entry.id,
+      depth,
+      cwd: typeof entry.cwd === 'string' ? entry.cwd : undefined,
+    }
+  })
+}
+
+/**
+ * The children the caller asked to delete, narrowed to real descendants. A
+ * stale or unrelated id is dropped instead of failing the delete: the parent is
+ * the session the user clicked, and that click must still land.
+ *
+ * @returns the descendants' own ids, in the order they were asked for.
+ */
+function selectChildDeletes(headers, sessionId, requested) {
+  if (!Array.isArray(requested) || requested.length === 0) return []
+  const descendants = new Map()
+  for (const entry of collectDescendants(headers, sessionId)) {
+    descendants.set(bareSessionId(entry.id), entry.id)
+  }
+  const picked = []
+  for (const id of requested) {
+    if (typeof id !== 'string' || id === '') continue
+    const hit = descendants.get(bareSessionId(id))
+    if (hit !== undefined && !picked.includes(hit)) picked.push(hit)
+  }
+  return picked
+}
 
 // Scan every workspace directory under $DSH_HOME/sessions for the session's
 // directories, so the workspace-path encoding never has to be re-derived here.
@@ -604,6 +730,14 @@ async function deleteSession(ctx, sessionId, options) {
   // Undoable by default: only an explicit `recycle: false` sends the files to a
   // plain removal instead of the system trash.
   const recycle = options === undefined || options === null || options.recycle !== false
+  // Subagent sessions are sessions of their own; the ones the caller ticked are
+  // taken with their parent. Anything that is not a well-formed id is dropped
+  // here, before it reaches the filesystem.
+  const childSessionIds = options !== undefined && options !== null && Array.isArray(options.childSessionIds)
+    ? options.childSessionIds
+      .filter((id) => typeof id === 'string' && SESSION_ID_RE.test(id))
+      .filter((id) => bareSessionId(id) !== bareSessionId(sessionId))
+    : []
   const stopped = await quiesceAgent(ctx, sessionId)
   const { flushed, detached } = await flushAndDetach(ctx, sessionId)
   await assertNoActiveWriter(ctx, sessionId)
@@ -612,14 +746,7 @@ async function deleteSession(ctx, sessionId, options) {
   // Bin switch on (the default) they are staged and the shell moves them to the
   // bin in the background; switched off, they are removed outright — that is what
   // the dialog promises in that state.
-  //
-  // The second directory pass costs nothing when the drain recreated nothing,
-  // which is the normal case.
-  const cacheFiles = findSessionCaches(sessionId)
-  const targets = [...findSessionDirs(sessionId), ...cacheFiles]
-  let removed = await retireTargets(targets, recycle)
-  await new Promise((resolve) => setImmediate(resolve))
-  removed = removed.concat(await retireTargets(findSessionDirs(sessionId), recycle))
+  const { removed, caches } = await retireSessionFiles(sessionId, recycle)
 
   const sp = ctx.get('sessionPersistence')
   if (sp && typeof sp.stat === 'function') {
@@ -633,18 +760,49 @@ async function deleteSession(ctx, sessionId, options) {
     throw new HttpError(500, 'verify-failed', 'session directories could not be fully removed')
   }
 
-  // Cache rows are projection state, not the source of truth: retire them even
-  // when the directories were already gone, so a deleted session cannot leave
-  // a ghost behind.
-  // Anything of the cache set that survived the shared call is reported, so a
-  // locked row is still visible in the result.
-  const cachesRemoved = cacheFiles.filter((file) => !fs.existsSync(file))
-
   const workspaceDetached = await withWorkspaceLock(() => detachFromWorkspace(ctx, sessionId))
-  if (removed.length === 0 && !workspaceDetached && !flushed && !detached && cachesRemoved.length === 0) {
+  if (removed === 0 && !workspaceDetached && !flushed && !detached && caches === 0) {
     throw new HttpError(404, 'not-found', 'session not found')
   }
-  return { removed: removed.length, caches: cachesRemoved.length, stopped, flushed, detached, workspaceDetached }
+
+  // Children last, and one failure never takes the parent result down with it:
+  // the parent is what the user clicked, so that click has to land.
+  const children = []
+  for (const childId of childSessionIds) {
+    try {
+      const childFiles = await retireSessionFiles(childId, recycle)
+      await withWorkspaceLock(() => detachFromWorkspace(ctx, childId))
+      children.push({ id: childId, removed: childFiles.removed, caches: childFiles.caches })
+    } catch (error) {
+      children.push({ id: childId, removed: 0, caches: 0, error: String((error && error.message) || error) })
+    }
+  }
+
+  return {
+    removed,
+    caches,
+    stopped,
+    flushed,
+    detached,
+    workspaceDetached,
+    children,
+  }
+}
+
+/**
+ * Take one session off the disk: its directories and its cache rows, then any
+ * directory the drain recreated. Shared by the parent and every child, so a
+ * subagent is retired exactly like the conversation the user clicked.
+ *
+ * @returns how many paths went away, and how many cache rows are now gone.
+ */
+async function retireSessionFiles(sessionId, recycle) {
+  const cacheFiles = findSessionCaches(sessionId)
+  const targets = [...findSessionDirs(sessionId), ...cacheFiles]
+  let gone = await retireTargets(targets, recycle)
+  await new Promise((resolve) => setImmediate(resolve))
+  gone = gone.concat(await retireTargets(findSessionDirs(sessionId), recycle))
+  return { removed: gone.length, caches: cacheFiles.filter((file) => !fs.existsSync(file)).length }
 }
 
 // --- artifacts: what a session touched, and quarantining it -----------------
@@ -1871,6 +2029,41 @@ export function apply(ctx) {
       },
     }))
 
+    // The subagent sessions behind one conversation. A subagent is a session of
+    // its own, linked only by `parentSession`, so the dialog needs this list
+    // before it can offer anything to tick.
+    fiber.effect(() => webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/children`,
+      handler: async (req, res) => {
+        if (!guard(req, res)) return
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, code: 'method', error: 'POST only' })
+          return
+        }
+        let body = {}
+        try {
+          const raw = await readBody(req)
+          if (raw) body = JSON.parse(raw)
+        } catch {
+          sendJson(res, 400, { ok: false, code: 'invalid', error: 'malformed JSON body' })
+          return
+        }
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        if (!SESSION_ID_RE.test(sessionId)) {
+          sendJson(res, 400, { ok: false, code: 'invalid', error: 'invalid session id' })
+          return
+        }
+        try {
+          const headers = await listSessionHeaders(ctx)
+          sendJson(res, 200, { ok: true, children: describeChildren(headers, sessionId) })
+        } catch (error) {
+          const status = error instanceof HttpError ? error.status : 500
+          const code = error instanceof HttpError ? error.code : 'internal'
+          sendJson(res, status, { ok: false, code, error: String((error && error.message) || error) })
+        }
+      },
+    }))
     fiber.effect(() => webServer.register({
       kind: 'exact',
       path: `${ROUTE_PREFIX}/delete`,
@@ -1907,7 +2100,10 @@ export function apply(ctx) {
             ? await planArtifacts(ctx, sessionId, undefined, { skipGit: body.quarantine.skipGit === true })
             : null
           const quarantine = await runQuarantine(ctx, sessionId, body.quarantine, plan)
-          const result = await deleteSession(ctx, sessionId, { recycle: body.recycle !== false })
+          const result = await deleteSession(ctx, sessionId, {
+            recycle: body.recycle !== false,
+            childSessionIds: Array.isArray(body.childSessionIds) ? body.childSessionIds : [],
+          })
           sendJson(res, 200, quarantine === null ? { ok: true, ...result } : { ok: true, ...result, quarantine })
         } catch (error) {
           const status = error instanceof HttpError ? error.status : 500
@@ -1952,7 +2148,10 @@ export function apply(ctx) {
         // deletions of the same storage.
         const results = await runWithConcurrency(sessionIds, BATCH_CONCURRENCY, async (sessionId) => {
           try {
-            const result = await deleteSession(ctx, sessionId, { recycle: body.recycle !== false })
+            const result = await deleteSession(ctx, sessionId, {
+              recycle: body.recycle !== false,
+              childSessionIds: Array.isArray(body.childSessionIds) ? body.childSessionIds : [],
+            })
             return { sessionId, ok: true, removed: result.removed }
           } catch (error) {
             return {
@@ -1997,8 +2196,15 @@ export const internals = {
   quarantineFiles,
   resolveQuarantineRoot,
   removeForever,
+  deleteSession,
   retirePaths,
   retireTargets,
+  listSessionHeaders,
+  collectOrphans,
+  collectDescendants,
+  bareSessionId,
+  describeChildren,
+  selectChildDeletes,
   runQuarantine,
   sendToRecycleBin,
   toolTarget,

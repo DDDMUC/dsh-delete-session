@@ -23,6 +23,7 @@ DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只
 - **删除至系统回收站（默认开）** —— 会话日志、工作区记账与投影缓存一并进**系统回收站**：Windows 回收站、macOS 废纸篓、Linux 的 `gio trash`。删错了从回收站还原即可。设置页可以关掉它，关掉后就是**直接从硬盘移除，不可恢复**
 - **对话框文案跟随开关** —— 勾选时写「并放进系统回收站」，取消勾选时写「永久删除…不可恢复」。你看到的永远是你实际会得到的
 - **风险确认** —— 每次删除弹出确认对话框，显示会话标题与 ID。要不要弹这个框**只在设置页改**，弹窗里没有快捷勾选；**按住 Shift 点击**可以临时强制弹窗
+- **子会话一起删** —— 子代理是**独立会话**（独立目录、独立日志），父会话删掉后它们会变成孤儿留在磁盘上。现在删除对话时会处理它派生的子会话：设置里勾选「同时删除子会话」就一起删；不勾选则弹窗列出子会话，由你勾选要删哪些（默认全选）
 - **多选批量删除** —— 会话菜单「多选」进入选择模式：勾选多行后底部操作条显示「已选 N 个 / 取消 / 删除」；点删除立即批量执行，被选中的行乐观隐藏、操作条实时显示进度，客户端 6 路并发、工作区记账串行；失败的行恢复显示并保持选中，方便重试；Esc 退出
 - **产出文件隔离（可选，默认关闭）** —— 打开后，删除会话时还能把这个对话在工作目录里产出的文件**移进隔离夹**，而不是直接删掉；范围可选「仅新建」或「新建的和改过的」，模式可选「全部直接隔离」或「先列清单由你勾选」
 - **跳过 git 仓库内的文件（默认开）** —— 在项目里干过活的对话，产出文件里往往就是项目源码。开启后仓库内的文件一律不碰，避免删一个对话把项目搬空
@@ -67,6 +68,7 @@ dsh plugin --profile web add github:DDDMUC/dsh-delete-session
 | 产出文件默认全部进隔离夹 | 关 | 关：先列清单由你勾选；开：整批自动移走，不列清单也不扫描 |
 | 范围：仅新建 / 新建的和改过的 | 仅新建 | 只动对话自己创建的文件，还是连它改写过的既有文件一起 |
 | **跳过 git 仓库内的文件** | **开** | 仓库内的文件一律不碰 |
+| **同时删除子会话** | **关** | 开：删对话时把它派生的子代理会话一起删掉。关：弹窗列出子会话，由你勾选 |
 | 隔离夹保存位置 | 空（= `$DSH_HOME`） | 可手输、可点「选择文件夹…」调系统对话框、可点「打开」在资源管理器里定位 |
 
 ### 删除之后文件在哪
@@ -138,7 +140,7 @@ node test/checkbox.dom.test.js     # 67 项，客户端半
 - 多选勾选框仍是对会话行的 DOM 装饰，依赖宿主 `data-row-key="session:<id>"`；核心 UI 若改名，多选会静默失效（**菜单与对话框不受影响**，它们走官方槽位）
 - 产出文件清理默认关闭，打开后仍有几条边界：`bash` / `pwsh` 里创建的文件（`npm run build`、`git clone`、`> file`）**永远检测不到**；**目录永不移走**；清单上限 500 条；**没有还原界面**，隔离夹靠手工搬回
 - 「新建 vs 改过」的判定依赖 `fs-observation-policy` 保持启用
-- 批量删除（多选）**不**处理产出文件
+- 批量删除（多选）**不**处理产出文件，也**不**处理子会话
 - 暂存目录与隔离夹**没有自动清理**，会一直堆在 `$DSH_HOME` 下
 
 ### 兼容性
@@ -282,7 +284,7 @@ Both suites are **mutation-checked**: reverting an implementation or breaking it
 - The multi-select tick is still a DOM decoration on session rows and depends on `data-row-key="session:<id>"`. If core UI renames it, multi-select goes quiet (the menu and dialog are unaffected — they use official slots)
 - Produced-file handling is off by default and still has edges: files created inside `bash` / `pwsh` (`npm run build`, `git clone`, `> file`) are **never detected**; **directories are never moved**; the list caps at 500; there is **no restore UI** — move files back from the quarantine by hand
 - Created-vs-changed depends on `fs-observation-policy` staying enabled
-- Batch delete does **not** handle produced files
+- Batch delete does **not** handle produced files, and does **not** touch child sessions
 - Staging and quarantine folders **are never cleaned up automatically**
 
 ### Compatibility

@@ -60,6 +60,12 @@ window.__ModuleLoader__.load({
       batchFailed: '批量删除失败：',
       pageAsk: '删除时询问',
       pageRecycle: '删除至回收站',
+      pageSyncChildren: '同时删除子会话',
+      starAsk: '⭐ 顺手留颗 Star，作者能高兴一整天',
+      starCta: '行，给你一颗 Star',
+      pageSyncChildrenOn: '删除对话时，把它派生的子代理会话一起删掉。',
+      pageSyncChildrenOff: '不勾选时，删除前会列出子会话，由你勾选要删哪些。',
+      childrenHint: '这个对话有 {n} 个子会话（子代理），勾选的会一起删除。',
       pageRecycleOn: '删除后放进系统回收站，可以还原。',
       pageRecycleOff: '删除后直接从硬盘移除，不可恢复。',
       pageHintAsk: '每次删除会话前都会弹出确认框。',
@@ -148,6 +154,12 @@ window.__ModuleLoader__.load({
       batchFailed: 'Batch delete failed: ',
       pageAsk: 'Ask before deleting',
       pageRecycle: 'Delete to the Recycle Bin',
+      pageSyncChildren: 'Delete child sessions too',
+      starAsk: '⭐ A star would make the author\'s day',
+      starCta: 'Fine — have one',
+      pageSyncChildrenOn: 'A delete also removes the subagent sessions it spawned.',
+      pageSyncChildrenOff: 'When off, the dialog lists the child sessions and you tick the ones to delete.',
+      childrenHint: 'This conversation has {n} child sessions (subagents). Ticked ones are deleted too.',
       pageRecycleOn: 'The session goes to the system trash and can be restored.',
       pageRecycleOff: 'The session is removed from the disk right away and cannot be restored.',
       pageHintAsk: 'Show a confirmation dialog before every session delete.',
@@ -366,6 +378,8 @@ window.__ModuleLoader__.load({
     const SKIP_GIT_KEY = 'dsh-delete-session:skip-git'
     /** Whether a delete goes to the system trash instead of vanishing. */
     const RECYCLE_KEY = 'dsh-delete-session:recycle'
+    /** Whether a delete takes the subagent sessions with it, without asking. */
+    const SYNC_CHILDREN_KEY = 'dsh-delete-session:sync-children'
     /** How many artifact rows the dialog lists before collapsing the rest. */
     const ARTIFACT_ROWS_SHOWN = 40
     const prefListeners = new Set()
@@ -447,6 +461,18 @@ window.__ModuleLoader__.load({
 
     function setRecycleSession(on) {
       writePref(RECYCLE_KEY, on ? null : '0')
+    }
+
+    /**
+     * Take the child sessions along without asking. Off by default: a subagent is
+     * a conversation of its own, so it is offered rather than swept up.
+     */
+    function syncChildren() {
+      return readPref(SYNC_CHILDREN_KEY, '0') === '1'
+    }
+
+    function setSyncChildren(on) {
+      writePref(SYNC_CHILDREN_KEY, on ? '1' : null)
     }
 
     /** The chosen quarantine root, or '' for "use the host default". */
@@ -535,10 +561,15 @@ window.__ModuleLoader__.load({
         .catch((reason) => toast(t('rootOpenFailed') + String((reason && reason.message) || reason), true))
     }
 
-    function postDelete(sessionId, quarantine) {
+    function postDelete(sessionId, quarantine, childSessionIds) {
       const root = quarantineRoot()
       const payload = quarantine === undefined ? { sessionId } : { sessionId, quarantine }
       if (root !== '') payload.root = root
+      // Subagent sessions are sessions of their own, so they travel as a list the
+      // host can verify rather than something it has to discover.
+      if (Array.isArray(childSessionIds) && childSessionIds.length > 0) {
+        payload.childSessionIds = childSessionIds
+      }
       // Whether the files go to the system trash is a per-delete choice, so it
       // travels with the request rather than being read from the host config.
       payload.recycle = recycleSession()
@@ -628,6 +659,8 @@ window.__ModuleLoader__.load({
       '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
       '.dsdel-page{display:flex;flex-direction:column;gap:8px}',
       '.dsdel-page-hint{margin:0;color:var(--dsw-alias-label-tertiary,#888);font-size:13px;line-height:20px}',
+      '.dsdel-star{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-tertiary,#8b93a1);padding:2px 2px 0;}',
+      '.dsdel-star-link{color:var(--dsw-alias-brand-primary,#4d76e6);text-decoration:underline;}',
       '.dsdel-root-input{flex:1 1 220px;min-width:160px;min-height:30px;padding:0 10px;border:1px solid var(--dsw-alias-border-secondary,#d0d0d0);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px}',
       '.dsdel-picker-path{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-all}',
       // A wider confirmation dialog: the class reaches it when `Modal` forwards
@@ -1063,9 +1096,63 @@ window.__ModuleLoader__.load({
         : artifactsAuto()
           ? { auto: true, loading: false, plan: null, error: null, selected: new Set() }
           : { auto: false, loading: true, plan: null, error: null, selected: new Set() }
-      state.dialog = { sessionId, title: title || null, busy: false, error: null, skip: false, artifacts }
+      state.dialog = {
+        sessionId,
+        title: title || null,
+        busy: false,
+        error: null,
+        artifacts,
+        // The subagent sessions this conversation spawned. Filled in after the
+        // dialog opens: the list costs one host call, and on most conversations
+        // there is nothing to list.
+        children: { loading: true, list: [], selected: new Set() },
+      }
       publish()
       if (artifacts !== null && artifacts.auto !== true) loadArtifacts(sessionId)
+      loadChildren(sessionId)
+    }
+
+    /**
+     * List the subagent sessions behind this conversation. With the switch on they
+     * are all taken with the parent; with it off every one starts ticked and the
+     * dialog lets the user narrow the set.
+     */
+    function loadChildren(sessionId) {
+      fetch(`/dsh-delete-session/children`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      })
+        .then(async (res) => {
+          let data = {}
+          try { data = await res.json() } catch { /* keep {} */ }
+          const list = res.ok && Array.isArray(data.children) ? data.children : []
+          const dialog = state.dialog
+          if (dialog === null || dialog.sessionId !== sessionId) return
+          dialog.children = {
+            loading: false,
+            list,
+            selected: new Set(list.map((child) => child.id)),
+          }
+          publish()
+        })
+        .catch(() => {
+          const dialog = state.dialog
+          if (dialog === null || dialog.sessionId !== sessionId) return
+          // A host that cannot list children still deletes the parent; reporting
+          // an error here would block a delete that is otherwise fine.
+          dialog.children = { loading: false, list: [], selected: new Set() }
+          publish()
+        })
+    }
+
+    /** The children this delete should take along. */
+    function childSessionIdsFor(dialog) {
+      if (dialog.children === undefined || dialog.children === null) return []
+      if (syncChildren()) return dialog.children.list.map((child) => child.id)
+      return dialog.children.list
+        .filter((child) => dialog.children.selected.has(child.id))
+        .map((child) => child.id)
     }
 
     /** Fetch the read-only scan and preselect the current scope's candidates. */
@@ -1221,11 +1308,12 @@ window.__ModuleLoader__.load({
       const dialog = state.dialog
       if (dialog === null || dialog.busy) return
       const quarantine = quarantineRequest(dialog)
+      const childSessionIds = childSessionIdsFor(dialog)
       dialog.busy = true
       dialog.error = null
       state.pending.add(dialog.sessionId)
       publish()
-      postDelete(dialog.sessionId, quarantine)
+      postDelete(dialog.sessionId, quarantine, childSessionIds)
         .then((result) => {
           state.dialog = null
           const outcome = result && result.quarantine ? result.quarantine : null
@@ -1320,6 +1408,32 @@ window.__ModuleLoader__.load({
      * (ask mode) or a single line stating how many files will move (auto mode).
      * A null `artifacts` means the feature is off and the dialog says nothing.
      */
+    /**
+     * The subagent sessions behind this conversation. Hidden while the switch
+     * already answers the question, and while the list is still loading.
+     */
+    function renderChildren(dialog, translate) {
+      const children = dialog.children
+      if (children === undefined || children === null) return null
+      if (children.loading) return null
+      if (children.list.length === 0) return null
+      if (syncChildren()) return null
+      return h('div', { key: 'children', className: 'dsdel-modal-children' },
+        h('p', { key: 'hint', className: 'dsdel-modal-text' },
+          translate('childrenHint', children.list.length)),
+        ...children.list.map((child) => h(primitives.Checkbox, {
+          key: `child:${child.id}`,
+          checked: children.selected.has(child.id),
+          label: child.cwd ? `${child.id} · ${child.cwd}` : child.id,
+          onChange: (checked) => {
+            if (checked === true) children.selected.add(child.id)
+            else children.selected.delete(child.id)
+            publish()
+          },
+        })),
+      )
+    }
+
     function renderArtifacts(artifacts, translate) {
       if (artifacts === null) return null
       // Auto mode never scanned, so there is no plan to describe: name the
@@ -1512,6 +1626,7 @@ window.__ModuleLoader__.load({
           h('p', { key: 'desc', className: 'dsdel-modal-text' },
             translate(recycleSession() ? 'descRecycle' : 'descPermanent')),
           renderArtifacts(dialog.artifacts, translate),
+          renderChildren(dialog, translate),
           // Whether a delete asks first is a setting, not a dialog affordance:
           // it lives on the plugin page only, so this dialog never changes it.
           dialog.error !== null
@@ -1540,6 +1655,7 @@ window.__ModuleLoader__.load({
       const defaultRootValue = () => (pageSnapshot && pageSnapshot.defaultRoot) || ''
       const [ask, setAsk] = react.useState(!skipConfirm())
       const [recycle, setRecycle] = react.useState(recycleSession())
+      const [syncChildrenState, setSyncChildrenState] = react.useState(syncChildren())
       const [off, setOff] = react.useState(artifactsOff())
       const [auto, setAuto] = react.useState(artifactsAuto())
       const [scope, setScope] = react.useState(artifactScope())
@@ -1585,6 +1701,18 @@ window.__ModuleLoader__.load({
         }),
         h('p', { key: 'recycleHint', className: 'dsdel-page-hint' },
           translate(recycle ? 'pageRecycleOn' : 'pageRecycleOff')),
+
+        h(primitives.Checkbox, {
+          key: 'syncChildren',
+          checked: syncChildrenState,
+          label: translate('pageSyncChildren'),
+          onChange: (checked) => {
+            setSyncChildrenState(checked === true)
+            setSyncChildren(checked === true)
+          },
+        }),
+        h('p', { key: 'syncChildrenHint', className: 'dsdel-page-hint' },
+          translate(syncChildrenState ? 'pageSyncChildrenOn' : 'pageSyncChildrenOff')),
 
         h(primitives.Checkbox, {
           key: 'off',
@@ -1712,6 +1840,19 @@ window.__ModuleLoader__.load({
           ),
         )
       }
+
+      // A quiet link to the repository, last in the card. It is a nudge, not a
+      // setting, so it never competes with the controls above it — and it is a
+      // plain anchor, so clicking it opens the page instead of switching tabs here.
+      children.push(h('div', { key: 'star', className: 'dsdel-star' },
+        h('span', { key: 'ask' }, translate('starAsk')),
+        h('a', {
+          key: 'cta',
+          className: 'dsdel-star-link',
+          href: 'https://github.com/DDDMUC/dsh-delete-session',
+          target: '_blank',
+          rel: 'noreferrer',
+        }, translate('starCta'))))
 
       return h('div', { className: 'dsdel-page' }, children)
     }
