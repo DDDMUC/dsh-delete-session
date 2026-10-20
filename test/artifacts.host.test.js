@@ -954,7 +954,13 @@ test('the switch decides between staging for the bin and removing outright', asy
 
 // --- subagent sessions are separate sessions, linked by parentSession ------
 
-const header = (id, parentSession) => (parentSession === undefined ? { id } : { id, parentSession })
+/** A session with no parent at all. */
+const header = (id) => ({ id })
+/** A real subagent: DSH marks these with `origin`, and they belong to their parent. */
+const child = (id, parentSession) => ({ id, parentSession, origin: 'subagent', delegationDepth: 1 })
+/** A fork: it records where it branched from, but it is a conversation of its own. */
+const fork = (id, parentSession) => ({ id, parentSession, isSeeded: true, delegationDepth: 0 })
+
 
 function fakeContext(services) {
   return { get: (name) => services[name] }
@@ -963,8 +969,8 @@ function fakeContext(services) {
 test('a delete finds the grandchildren behind a child, not just the children', () => {
   const headers = [
     header('session-parent'),
-    header('session-child', 'session-parent'),
-    header('session-grandchild', 'session-child'),
+    child('session-child', 'session-parent'),
+    child('session-grandchild', 'session-child'),
   ]
 
   const found = internals.collectDescendants(headers, 'session-parent')
@@ -976,7 +982,7 @@ test('a delete finds the grandchildren behind a child, not just the children', (
 test('a parent link matches whether or not either id carries the prefix', () => {
   const headers = [
     header('session-parent'),
-    header('child-uuid', 'parent-uuid'),
+    child('child-uuid', 'parent-uuid'),
   ]
 
   const found = internals.collectDescendants(headers, 'parent-uuid')
@@ -987,7 +993,7 @@ test('a parent link matches whether or not either id carries the prefix', () => 
 test('a session that names itself as its parent does not loop forever', () => {
   const headers = [
     header('session-parent'),
-    header('session-child', 'session-child'),
+    child('session-child', 'session-child'),
   ]
 
   const found = internals.collectDescendants(headers, 'session-parent')
@@ -995,11 +1001,36 @@ test('a session that names itself as its parent does not loop forever', () => {
   assert.deepEqual(found, [], 'a self-parented session is not its own descendant')
 })
 
+test('a forked conversation is not a child of the conversation it branched from', () => {
+  const headers = [
+    header('session-parent'),
+    fork('session-fork', 'session-parent'),
+  ]
+
+  const found = internals.collectDescendants(headers, 'session-parent')
+
+  assert.deepEqual(found, [], 'a fork is a visible conversation, not a subagent')
+})
+
+test('a fork is never offered in the dialog, so it can never be ticked', () => {
+  const headers = [
+    header('session-parent'),
+    fork('session-fork', 'session-parent'),
+    child('session-real-child', 'session-parent'),
+  ]
+
+  const listed = internals.describeChildren(headers, 'session-parent')
+
+  assert.deepEqual(listed.map((c) => c.id), ['session-real-child'])
+  const picked = internals.selectChildDeletes(headers, 'session-parent', ['session-fork', 'session-real-child'])
+  assert.deepEqual(picked, ['session-real-child'], 'even a forged fork id is dropped')
+})
+
 test('an orphan is a session whose parent is gone', () => {
   const headers = [
     header('session-parent'),
-    header('session-kept', 'session-parent'),
-    header('session-orphan', 'session-deleted-long-ago'),
+    child('session-kept', 'session-parent'),
+    child('session-orphan', 'session-deleted-long-ago'),
   ]
 
   const orphans = internals.collectOrphans(headers)
@@ -1036,8 +1067,8 @@ test('a host that can list nothing yields no headers rather than throwing', asyn
 test('the child list carries a depth so nesting is visible in the dialog', () => {
   const headers = [
     header('session-parent'),
-    { id: 'session-child', parentSession: 'session-parent', cwd: 'E:\\work' },
-    { id: 'session-grandchild', parentSession: 'session-child', cwd: 'E:\\work' },
+    { ...child('session-child', 'session-parent'), cwd: 'E:\\work' },
+    { ...child('session-grandchild', 'session-child'), cwd: 'E:\\work' },
   ]
 
   const children = internals.describeChildren(headers, 'session-parent')
@@ -1051,8 +1082,8 @@ test('the child list carries a depth so nesting is visible in the dialog', () =>
 test('only the ids the user picked, and only real descendants, are deleted', () => {
   const headers = [
     header('session-parent'),
-    header('session-child', 'session-parent'),
-    header('session-grandchild', 'session-child'),
+    child('session-child', 'session-parent'),
+    child('session-grandchild', 'session-child'),
     header('session-unrelated'),
   ]
 
@@ -1068,8 +1099,8 @@ test('only the ids the user picked, and only real descendants, are deleted', () 
 test('a picked child is matched by its bare uuid but deleted under its own id', () => {
   const headers = [
     header('session-parent'),
-    header('session-grandchild', 'session-child'),
-    header('session-child', 'session-parent'),
+    child('session-grandchild', 'session-child'),
+    child('session-child', 'session-parent'),
   ]
 
   // The dialog may hold either spelling; the delete always uses the header's own.
@@ -1138,4 +1169,49 @@ test('the delete reports which children failed', async () => {
   })
 
   assert.equal(result.children.length, 0, 'an invalid id never becomes a child delete')
+})
+
+test('a child is probed for a live writer before its files go', async () => {
+  const parent = plantSession(PARENT_ID)
+  const child = plantSession(CHILD_ID)
+  const probed = []
+
+  // A host service that answers the write-lease probe for whoever asks.
+  const ctx = {
+    get: (name) => (name === 'sessionPersistence'
+      ? {
+        open: async (id) => { probed.push(id); return { close: async () => {} } },
+        stat: async () => undefined,
+      }
+      : undefined),
+  }
+
+  await internals.deleteSession(ctx, PARENT_ID, { recycle: false, childSessionIds: [CHILD_ID] })
+
+  assert.ok(probed.includes(CHILD_ID), 'the child gets the same write-lease probe the parent gets')
+  assert.equal(fs.existsSync(child.dir), false, 'and it is deleted once the probe comes back clear')
+})
+
+test('a child that is still open is left alone and reported as skipped', async () => {
+  const parent = plantSession(PARENT_ID)
+  const child = plantSession(CHILD_ID)
+
+  // Busy on every attempt: the guard gives up and the child must survive.
+  const ctx = {
+    get: (name) => (name === 'sessionPersistence'
+      ? {
+        open: async (id) => {
+          if (id === CHILD_ID) throw new Error('session is busy: another writer holds it')
+          return { close: async () => {} }
+        },
+        stat: async () => undefined,
+      }
+      : undefined),
+  }
+
+  const result = await internals.deleteSession(ctx, PARENT_ID, { recycle: false, childSessionIds: [CHILD_ID] })
+
+  assert.equal(fs.existsSync(parent.dir), false, 'the parent still goes')
+  assert.equal(fs.existsSync(child.dir), true, 'a busy child is not deleted under its writer')
+  assert.equal(result.children[0].skipped, 'busy', 'and the report says why')
 })

@@ -117,6 +117,10 @@ function collectDescendants(headers, sessionId) {
   const byParent = new Map()
   for (const header of headers) {
     if (typeof header.parentSession !== 'string') continue
+    // Only subagents belong to a parent. A fork records where it branched from,
+    // but it is a conversation of its own and the user can open it like any other:
+    // sweeping those up deletes work nobody asked to delete.
+    if (header.origin !== 'subagent') continue
     const key = bareSessionId(header.parentSession)
     const list = byParent.get(key)
     if (list === undefined) byParent.set(key, [header])
@@ -144,7 +148,10 @@ function collectDescendants(headers, sessionId) {
  */
 function collectOrphans(headers) {
   const present = new Set(headers.map((entry) => bareSessionId(entry.id)))
-  return headers.filter((entry) => typeof entry.parentSession === 'string'
+  // Same rule as the descendant walk: a fork whose source is gone is still a
+  // conversation of its own, not an abandoned child.
+  return headers.filter((entry) => entry.origin === 'subagent'
+    && typeof entry.parentSession === 'string'
     && !present.has(bareSessionId(entry.parentSession)))
 }
 
@@ -770,11 +777,27 @@ async function deleteSession(ctx, sessionId, options) {
   const children = []
   for (const childId of childSessionIds) {
     try {
+      // A subagent can still be running while its parent is deleted. Removing the
+      // log out from under it is what made the agent's next write fail with ENOENT,
+      // so a child gets the same guard as the parent: stop it, flush it, and wait
+      // for the write lease before a single byte moves.
+      await quiesceAgent(ctx, childId)
+      await flushAndDetach(ctx, childId)
+      await assertNoActiveWriter(ctx, childId)
       const childFiles = await retireSessionFiles(childId, recycle)
       await withWorkspaceLock(() => detachFromWorkspace(ctx, childId))
       children.push({ id: childId, removed: childFiles.removed, caches: childFiles.caches })
     } catch (error) {
-      children.push({ id: childId, removed: 0, caches: 0, error: String((error && error.message) || error) })
+      // Never delete a child that could not be quieted: something is still writing
+      // to it. Report it so the caller can try again once it settles.
+      const busy = error instanceof HttpError && error.code === 'busy'
+      children.push({
+        id: childId,
+        removed: 0,
+        caches: 0,
+        skipped: busy ? 'busy' : 'error',
+        error: String((error && error.message) || error),
+      })
     }
   }
 
