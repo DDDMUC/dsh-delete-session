@@ -259,8 +259,32 @@ window.__ModuleLoader__.load({
       const raw = typeof injected === 'function' ? injected : t
       if (raw.__dsdelLocalized === true) return raw
       const wrapped = (key, a, b) => {
-        const value = raw(key, a, b)
-        return typeof value === 'function' ? value(a, b) : value
+        // Our own dictionary answers first, and it is resolved HERE rather than
+        // through the host. `dsh-client-locale` interpolates whatever it finds as
+        // soon as params are present - it calls `template.replace(...)` - while
+        // most of these entries are functions. Handing it params made the host
+        // throw "template.replace is not a function", and the slot boundary turned
+        // that into an empty `data-slot-error` anchor: the bar vanished, Cancel
+        // and all. Calling it without params is no better: the host (and this
+        // module's own `t`) invoke function entries with no arguments, which
+        // produces "已选 undefined 个".
+        const dictionary = browserLang() === 'en' ? en : zh
+        const local = dictionary[key]
+        if (local !== undefined) {
+          if (typeof local === 'function') return local(a, b)
+          if (typeof local === 'string' && local.includes('{') && a !== undefined) {
+            const params = a !== null && typeof a === 'object'
+              ? a
+              : { n: a, done: a, total: b, ok: a, fail: b, path: a }
+            return local.replace(/\{(\w+)\}/g, (match, name) => (
+              params[name] === undefined ? match : String(params[name])
+            ))
+          }
+          return local
+        }
+        // A key this plugin does not ship: let the host answer.
+        const value = raw(key)
+        return typeof value === 'function' ? value(a, b) : (value === undefined || value === null ? key : value)
       }
       wrapped.__dsdelLocalized = true
       return wrapped
@@ -652,9 +676,19 @@ window.__ModuleLoader__.load({
       '.dsdel-check-on::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translateY(-1px)}',
       // 乐观删除：行先隐藏，失败时随 decorate 恢复
       '.dsdel-row-pending{display:none!important}',
-      '.dsdel-bar{position:fixed;left:12px;bottom:12px;z-index:2147483600;display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));box-shadow:0 12px 32px rgba(0,0,0,.28);color:var(--dsw-alias-label-primary,inherit);font-size:13px;background:linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),linear-gradient(var(--dsw-alias-bg-layer-2,#fff),var(--dsw-alias-bg-layer-2,#fff)),var(--dsw-alias-bg-base,#fff)}',
-      '.dsdel-bar-count{white-space:nowrap}',
-      '.dsdel-bar-btn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
+      '.dsdel-bar{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:6px 8px;box-sizing:border-box;font-size:13px}',
+      // The sidebar foot stacks three things: the footer-action row, the usage
+      // card and the account row. While a selection runs only the action row
+      // stays, so the bar sits where the account row used to end the sidebar.
+      'body.dsdel-selecting [class*="_footArea"] > *:not([class*="_footerActions"]){display:none}',
+      // The other footer buttons are named POSITIVELY, by the attributes their
+      // plugins put on them, and never by "everything except the bar": the bar
+      // turned out not to be a direct child of the slot container, so an
+      // exclusion rule silently hid the bar together with its Cancel button.
+      'body.dsdel-selecting [data-slot="sidebar.footer.action"] > [data-dsh-plugin]{display:none}',
+      'body.dsdel-selecting [data-slot="sidebar.footer.action"] > [class*="_entryRow"]{display:none}',
+      '.dsdel-bar-count{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary,inherit)}',
+      '.dsdel-bar-btn{flex:0 0 auto;white-space:nowrap;appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
       '.dsdel-bar-btn:disabled{opacity:.5;cursor:default}',
       '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
       '.dsdel-page{display:flex;flex-direction:column;gap:8px}',
@@ -722,7 +756,8 @@ window.__ModuleLoader__.load({
     // per-row disabling: every row is selectable and the batch deletes
     // immediately (the single-session flow keeps its own consent dialog).
 
-    let bar = null
+    // The bar lives in the sidebar footer slot: the host owns where that row sits,
+    // so there is no element here to create, dock or hide.
     let decorateRaf = null
     let rowObserver = null
 
@@ -766,7 +801,6 @@ window.__ModuleLoader__.load({
         document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
       }
     }
-
     function scheduleDecorate() {
       if (typeof requestAnimationFrame !== 'function') return
       if (decorateRaf !== null) return
@@ -789,74 +823,69 @@ window.__ModuleLoader__.load({
       return api
     }
 
-    function updateBar() {
-      if (!bar) return
-      const count = bar.querySelector('.dsdel-bar-count')
-      if (count) {
-        if (state.batch === null) {
-          count.textContent = t('selectedCount', state.selected.size)
-        } else {
-          // A move reports processed-so-far (success + failure + skip) in one
-          // number; a delete counts its own two buckets.
-          const done = state.batch.kind === 'move'
-            ? state.batch.done
-            : state.batch.done + state.batch.failed
-          count.textContent = state.batch.kind === 'move'
-            ? t('batchMoving', done, state.batch.total)
-            : t('batchRunning', done, state.batch.total)
-        }
-      }
-      const busy = state.batch !== null
-      const empty = state.selected.size === 0
-      const cancel = bar.querySelector('.dsdel-bar-cancel')
-      const move = bar.querySelector('.dsdel-bar-move')
-      const del = bar.querySelector('.dsdel-bar-danger')
-      if (cancel) cancel.disabled = busy
-      // Move and delete both need something selected, and both are inert while a
-      // batch is already running.
-      if (move) move.disabled = busy || empty
-      if (del) del.disabled = busy || empty
+    /**
+     * The batch bar, rendered into the host's `sidebar.footer.action` seat.
+     *
+     * The host decides where that row sits, how wide it is and whether the account
+     * chip shares it. Occupying the slot means this plugin never measures, docks,
+     * hides or restores host DOM: the row gains our controls while a selection is
+     * running, and loses them the moment it ends.
+     */
+    function BulkBar({ t: injected }) {
+      const translate = localizedTranslator(injected)
+      const view = useSnapshot()
+      // Outside selection mode the footer keeps its normal face.
+      if (!view.selecting) return null
+      const busy = view.batch !== null
+      const empty = view.selectedCount === 0
+      // A move reports processed-so-far (success + failure + skip) in one number;
+      // a delete counts its own two buckets.
+      const done = view.batch === null ? 0 : view.batch.kind === 'move' ? view.batch.done : view.batch.done + view.batch.failed
+      const label = view.batch === null
+        ? translate('selectedCount', view.selectedCount)
+        : view.batch.kind === 'move'
+          ? translate('batchMoving', done, view.batch.total)
+          : translate('batchRunning', done, view.batch.total)
+      return h('div', { className: 'dsdel-bar', role: 'toolbar' },
+        h('span', { key: 'count', className: 'dsdel-bar-count' }, label),
+        h('button', {
+          key: 'cancel',
+          type: 'button',
+          className: 'dsdel-bar-btn dsdel-bar-cancel',
+          disabled: busy,
+          onClick: (event) => {
+            if (event && event.stopPropagation) event.stopPropagation()
+            exitSelection()
+          },
+        }, translate('cancelSelect')),
+        // One more button when dsh-session-relocate is installed; otherwise the bar
+        // is exactly what it was before.
+        relocateApi() === null ? null : h('button', {
+          key: 'move',
+          type: 'button',
+          className: 'dsdel-bar-btn dsdel-bar-move',
+          disabled: busy || empty,
+          onClick: (event) => {
+            if (event && event.stopPropagation) event.stopPropagation()
+            runBatchMove()
+          },
+        }, translate('moveSelected')),
+        h('button', {
+          key: 'delete',
+          type: 'button',
+          className: 'dsdel-bar-btn dsdel-bar-danger',
+          disabled: busy || empty,
+          onClick: (event) => {
+            if (event && event.stopPropagation) event.stopPropagation()
+            runBatchDelete()
+          },
+        }, translate('deleteSelected')),
+      )
     }
-
-    function buildBar() {
-      const el = document.createElement('div')
-      el.className = 'dsdel-bar'
-      el.setAttribute('role', 'toolbar')
-      const count = document.createElement('span')
-      count.className = 'dsdel-bar-count'
-      const cancel = document.createElement('button')
-      cancel.type = 'button'
-      // Named so the bar never has to guess which plain button is Cancel.
-      cancel.className = 'dsdel-bar-btn dsdel-bar-cancel'
-      cancel.textContent = t('cancelSelect')
-      cancel.addEventListener('click', (e) => { e.stopPropagation(); exitSelection() })
-      const del = document.createElement('button')
-      del.type = 'button'
-      del.className = 'dsdel-bar-btn dsdel-bar-danger'
-      del.textContent = t('deleteSelected')
-      del.addEventListener('click', (e) => { e.stopPropagation(); runBatchDelete() })
-      el.appendChild(count)
-      el.appendChild(cancel)
-      // One more button when dsh-session-relocate is installed; otherwise the bar
-      // is exactly what it was before.
-      if (relocateApi() !== null) {
-        const move = document.createElement('button')
-        move.type = 'button'
-        move.className = 'dsdel-bar-btn dsdel-bar-move'
-        move.textContent = t('moveSelected')
-        move.addEventListener('click', (e) => { e.stopPropagation(); runBatchMove() })
-        el.appendChild(move)
-      }
-      el.appendChild(del)
-      document.body.appendChild(el)
-      return el
-    }
-
     function toggleSelect(id) {
       if (state.selected.has(id)) state.selected.delete(id)
       else state.selected.add(id)
       publish()
-      updateBar()
     }
 
     function onSelectClickCapture(e) {
@@ -877,13 +906,24 @@ window.__ModuleLoader__.load({
       exitSelection()
     }
 
+    /**
+     * Mark the page while the mode runs. The marker is the only hook the
+     * stylesheet needs to let the account row step aside for the bar.
+     */
+    function markSelecting(on) {
+      if (typeof document === 'undefined' || !document.body) return
+      const classes = document.body.classList
+      if (!classes) return
+      if (on) classes.add('dsdel-selecting')
+      else classes.remove('dsdel-selecting')
+    }
+
     function enterSelection() {
       if (state.selecting) return
       state.selecting = true
       state.selected.clear()
       ensureStyle()
-      if (!bar) bar = buildBar()
-      bar.style.display = 'flex'
+      markSelecting(true)
       document.addEventListener('click', onSelectClickCapture, true)
       document.addEventListener('keydown', onSelectKeydown, true)
       if (typeof MutationObserver === 'function') {
@@ -891,7 +931,6 @@ window.__ModuleLoader__.load({
         rowObserver.observe(document.body, { childList: true, subtree: true })
       }
       publish()
-      updateBar()
     }
 
     function exitSelection(options) {
@@ -904,7 +943,7 @@ window.__ModuleLoader__.load({
         state.pending.clear()
         document.querySelectorAll('.dsdel-row-pending').forEach((el) => el.classList.remove('dsdel-row-pending'))
       }
-      if (bar) bar.style.display = 'none'
+      markSelecting(false)
       document.removeEventListener('click', onSelectClickCapture, true)
       document.removeEventListener('keydown', onSelectKeydown, true)
       if (rowObserver) { rowObserver.disconnect(); rowObserver = null }
@@ -936,7 +975,6 @@ window.__ModuleLoader__.load({
       state.selected.clear()
       for (const id of ids) state.pending.add(id)
       publish()
-      updateBar()
 
       const failedIds = []
       let cursor = 0
@@ -955,7 +993,6 @@ window.__ModuleLoader__.load({
             state.pending.delete(id)
           }
           publish()
-          updateBar()
         }
       }
       const workers = []
@@ -973,7 +1010,6 @@ window.__ModuleLoader__.load({
           for (const id of failedIds) state.selected.add(id)
           toast(t('batchPartial', ok, failed), true)
           publish()
-          updateBar()
         }
         refreshList()
         for (const id of ids) {
@@ -997,7 +1033,6 @@ window.__ModuleLoader__.load({
 
       state.batch = { kind: 'move', total: ids.length, done: 0, failed: 0 }
       publish()
-      updateBar()
 
       let result
       try {
@@ -1006,13 +1041,11 @@ window.__ModuleLoader__.load({
             if (state.batch === null || state.batch.kind !== 'move') return
             if (typeof done === 'number' && Number.isFinite(done)) state.batch.done = Math.max(0, done)
             if (typeof total === 'number' && Number.isFinite(total)) state.batch.total = Math.max(1, total)
-            updateBar()
           },
         })
       } catch (reason) {
         state.batch = null
         publish()
-        updateBar()
         toast(t('failed') + String((reason && reason.message) || reason), true)
         return
       }
@@ -1024,7 +1057,6 @@ window.__ModuleLoader__.load({
       if (result && (result.canceled === true || result.cancelled === true)) {
         // The user backed out of the target picker; keep the selection for a retry.
         publish()
-        updateBar()
         return
       }
 
@@ -1930,12 +1962,16 @@ window.__ModuleLoader__.load({
           { name: 'plugins.row.config', key: `${NS}#${NS}` },
           AskBeforeDeleteOption,
         ))
+        // The batch bar rides the official footer seat, so the host owns its
+        // position and the row it shares with the account chip.
+        slots.inject('sidebar.footer.action', () => slots.register(
+          { name: 'sidebar.footer.action', id: `${NS}-bulkbar`, order: 30, locale: NS },
+          BulkBar,
+        ))
 
-        // The batch bar and its row observer are the only long-lived DOM state;
-        // drop them when the plugin unloads.
+        // Leaving the mode disconnects the row observer and strips the checkboxes.
         return () => {
           exitSelection()
-          if (bar) { bar.remove(); bar = null }
         }
       }
 

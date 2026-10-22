@@ -191,6 +191,10 @@ function matches(node, selector) {
     return node._classes.has(selector.slice(1))
   }
 
+  // `[class*="_footArea"]` - how the bar finds the host's sidebar footer.
+  const classContains = /^\[class\*="([^"]*)"\]$/.exec(selector)
+  if (classContains !== null) return node.className.includes(classContains[1])
+
   const attrEquals = /^\[([\w-]+)="([^"]*)"\]$/.exec(selector)
   if (attrEquals !== null) return node.attributes[attrEquals[1]] === attrEquals[2]
 
@@ -265,6 +269,9 @@ async function loadPlugin(options = {}) {
     location: { reload() {} },
     dispatchEvent() {},
     Event: class { constructor(type) { this.type = type } },
+    // Viewport height: the docked bar is anchored to the footer's bottom edge,
+    // so the distance has to be computed against a real number.
+    innerHeight: 800,
   }
   globalThis.localStorage = makeStorage()
   // Node exposes `navigator` as a getter-only global, so it needs defining rather
@@ -404,9 +411,17 @@ async function loadPlugin(options = {}) {
     effect: (fn) => { const dispose = fn(); return () => { if (typeof dispose === 'function') dispose() } },
   })
 
+  // Mirrors `dsh-client-locale`: a function-valued entry is handed back
+  // UNTOUCHED (the caller invokes it), and a string is returned as-is when no
+  // params are given. Invoking here would hide the difference that once broke
+  // the real host.
   const t = (key, a, b) => {
     const value = locales[NS]?.zh?.[key]
-    return typeof value === 'function' ? value(a, b) : value ?? key
+    if (value === undefined) return key
+    if (typeof value === 'function') return value
+    if (a === undefined) return value
+    const params = a !== null && typeof a === 'object' ? a : { n: a, done: a, total: b, ok: a, fail: b, path: a }
+    return value.replace(/{(w+)}/g, (match, name) => (params[name] === undefined ? match : String(params[name])))
   }
 
   return { document, requests, rows, observers, slotRegistrations, locales, primitives: primitivesStub, t }
@@ -507,8 +522,31 @@ const totalCheckboxes = (harness) => harness.document.querySelectorAll('.dsdel-c
 const selectedCheckboxes = (harness) =>
   harness.document.querySelectorAll('.dsdel-check').filter((el) => el.classList.contains('dsdel-check-on')).length
 
-const bar = (harness) =>
-  walk(harness.document.body).find((node) => node._classes.has('dsdel-bar')) ?? null
+const FOOTER_SLOT = 'sidebar.footer.action'
+
+/**
+ * The batch bar is a slot occupant now: render the registered component the way
+ * the host would and inspect the element tree it returns. `null` means the
+ * footer is unoccupied, which is what "not selecting" looks like.
+ */
+const footerEntry = (harness) =>
+  harness.slotRegistrations.find((entry) => entry.spec.name === FOOTER_SLOT) ?? null
+
+const bar = (harness) => {
+  const entry = footerEntry(harness)
+  if (entry === null) return null
+  const node = entry.Component({})
+  return node === null || node === undefined ? null : node
+}
+
+const barChild = (harness, key) => {
+  const node = bar(harness)
+  if (node === null || node.props === undefined) return null
+  return findByKey(node.props.children, key)[0] ?? null
+}
+
+/** Invoke a bar button the way the host would dispatch a click. */
+const clickBar = (node) => node.props.onClick({ stopPropagation() {} })
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
@@ -778,18 +816,16 @@ test('leaving multi-select strips every checkbox', async () => {
 
   selectRow(harness).element.props.onSelect()
   await flush()
-  const control = bar(harness)
-  assert.ok(control, 'the bar exists')
+  assert.ok(bar(harness), 'the bar exists')
   assert.equal(totalCheckboxes(harness), 2)
 
   // Cancel is the bar's non-danger button.
-  const cancel = control.querySelector('.dsdel-bar-btn:not(.dsdel-bar-danger)')
-  cancel.fire('click', { stopPropagation() {} })
+  clickBar(barCancel(harness))
   await flush()
 
   assert.equal(totalCheckboxes(harness), 0, 'no checkbox survives the mode')
   assert.deepEqual(rowCheckboxes(harness), [0, 0])
-  assert.notEqual(control.style.display, 'flex', 'the bar is hidden again')
+  assert.equal(bar(harness), null, 'and the footer is empty again')
 })
 
 // --- the two modes must not leak into each other ----------------------------
@@ -801,8 +837,7 @@ test('entering, leaving, then deleting plants nothing', async () => {
 
   selectRow(harness).element.props.onSelect()
   await flush()
-  const control = bar(harness)
-  control.querySelector('.dsdel-bar-btn:not(.dsdel-bar-danger)').fire('click', { stopPropagation() {} })
+  clickBar(barCancel(harness))
   await flush()
 
   // Leaving the mode removed the observer that decorates; a later delete must
@@ -810,7 +845,7 @@ test('entering, leaving, then deleting plants nothing', async () => {
   await decorateViaSingleDelete(harness, SESSION_A)
 
   assert.equal(totalCheckboxes(harness), 0, 'the mode leaves no residue behind')
-  assert.notEqual(control.style.display, 'flex', 'the bar stays hidden')
+  assert.equal(bar(harness), null, 'the footer stays empty')
 })
 
 test('a row whose row key changes still gets no checkbox outside the mode', async () => {
@@ -1352,11 +1387,16 @@ test('the browse button opens a picker that walks directories and commits one', 
 // button appears between cancel and delete; when it is not, the bar is exactly
 // what it was before and no other logic changes.
 
-const barButtons = (harness) => bar(harness).querySelectorAll('.dsdel-bar-btn')
-const barMove = (harness) => bar(harness).querySelector('.dsdel-bar-move')
-const barCancel = (harness) => bar(harness).querySelector('.dsdel-bar-cancel')
-const barDelete = (harness) => bar(harness).querySelector('.dsdel-bar-danger')
-const barCount = (harness) => bar(harness).querySelector('.dsdel-bar-count')
+const barButtons = (harness) => {
+  const node = bar(harness)
+  if (node === null || node.props === undefined) return []
+  return (node.props.children || []).filter((child) => child !== null && child !== undefined
+    && child.props !== undefined && String(child.props.className || '').includes('dsdel-bar-btn'))
+}
+const barMove = (harness) => barChild(harness, 'move')
+const barCancel = (harness) => barChild(harness, 'cancel')
+const barDelete = (harness) => barChild(harness, 'delete')
+const barCount = (harness) => barChild(harness, 'count')
 const toasts = (harness) => harness.document.querySelectorAll('.dsdel-toast').map((el) => el.textContent)
 
 function installRelocate(moveSelection) {
@@ -1378,7 +1418,7 @@ test('without dsh-session-relocate the bar keeps exactly cancel and delete', asy
   await enterMulti(harness)
 
   assert.equal(barMove(harness), null, 'no move button is offered')
-  assert.deepEqual(barButtons(harness).map((el) => el.textContent), ['取消', '删除'])
+  assert.deepEqual(barButtons(harness).map((el) => el.props.children), ['取消', '删除'])
 })
 
 test('a relocate plugin that does not claim bulk move changes nothing', async () => {
@@ -1386,7 +1426,7 @@ test('a relocate plugin that does not claim bulk move changes nothing', async ()
   globalThis.window.__DSH_SESSION_RELOCATE__ = { version: '0.2.0', supportsBulkMove: false, moveSelection: async () => ({}) }
   mountRow(harness, SESSION_A)
   await enterMulti(harness)
-  assert.deepEqual(barButtons(harness).map((el) => el.textContent), ['取消', '删除'])
+  assert.deepEqual(barButtons(harness).map((el) => el.props.children), ['取消', '删除'])
 })
 
 test('with dsh-session-relocate the move button sits between cancel and delete', async () => {
@@ -1395,7 +1435,7 @@ test('with dsh-session-relocate the move button sits between cancel and delete',
   mountRow(harness, SESSION_A)
   await enterMulti(harness)
 
-  assert.deepEqual(barButtons(harness).map((el) => el.textContent), ['取消', '移动', '删除'], 'left to right')
+  assert.deepEqual(barButtons(harness).map((el) => el.props.children), ['取消', '移动', '删除'], 'left to right')
 })
 
 test('the move button is disabled until something is selected', async () => {
@@ -1404,13 +1444,13 @@ test('the move button is disabled until something is selected', async () => {
   const first = mountRow(harness, SESSION_A)
   await enterMulti(harness)
 
-  assert.equal(barMove(harness).disabled, true, 'nothing selected')
-  assert.equal(barDelete(harness).disabled, true, 'and delete agrees')
-  assert.equal(barCancel(harness).disabled, false, 'cancel is always live')
+  assert.equal(barMove(harness).props.disabled, true, 'nothing selected')
+  assert.equal(barDelete(harness).props.disabled, true, 'and delete agrees')
+  assert.equal(barCancel(harness).props.disabled, false, 'cancel is always live')
 
   clickRowIn(harness, first)
   await flush()
-  assert.equal(barMove(harness).disabled, false, 'one selection is enough')
+  assert.equal(barMove(harness).props.disabled, false, 'one selection is enough')
 })
 
 test('a move reports progress, then summarises, exits and refreshes', async () => {
@@ -1430,23 +1470,23 @@ test('a move reports progress, then summarises, exits and refreshes', async () =
   clickRowIn(harness, second)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
 
   assert.deepEqual(seen.ids, [SESSION_A.id, SESSION_B.id], 'the whole selection is handed over')
-  assert.equal(barCount(harness).textContent, '正在移动 0/2…')
-  assert.equal(barMove(harness).disabled, true, 'inert while the move runs')
-  assert.equal(barDelete(harness).disabled, true)
+  assert.equal(barCount(harness).props.children, '正在移动 0/2…')
+  assert.equal(barMove(harness).props.disabled, true, 'inert while the move runs')
+  assert.equal(barDelete(harness).props.disabled, true)
 
   seen.hooks.onProgress(1, 2)
-  assert.equal(barCount(harness).textContent, '正在移动 1/2…')
+  assert.equal(barCount(harness).props.children, '正在移动 1/2…')
 
   finish({ moved: 2, failed: 0, skipped: 0, total: 2, results: [] })
   await flush()
   await flush()
 
   assert.deepEqual(toasts(harness), ['已移动 2 个'], 'one summary line')
-  assert.notEqual(bar(harness).style.display, 'flex', 'multi-select exited')
+  assert.equal(bar(harness), null, 'multi-select exited')
 })
 
 test('a partial move reports both numbers', async () => {
@@ -1457,7 +1497,7 @@ test('a partial move reports both numbers', async () => {
   clickRowIn(harness, first)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
   await flush()
 
@@ -1472,14 +1512,14 @@ test('cancelling the target picker keeps the selection and says nothing', async 
   clickRowIn(harness, first)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
   await flush()
 
   assert.deepEqual(toasts(harness), [], 'nothing happened, so nothing is reported')
-  assert.equal(bar(harness).style.display, 'flex', 'multi-select is still open')
-  assert.equal(barCount(harness).textContent, '已选 1 个', 'the count is back')
-  assert.equal(barMove(harness).disabled, false, 'the retry is available')
+  assert.ok(bar(harness), 'multi-select is still open')
+  assert.equal(barCount(harness).props.children, '已选 1 个', 'the count is back')
+  assert.equal(barMove(harness).props.disabled, false, 'the retry is available')
 })
 
 test('a throwing relocate call ends the batch and reports the error', async () => {
@@ -1490,11 +1530,11 @@ test('a throwing relocate call ends the batch and reports the error', async () =
   clickRowIn(harness, first)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
   await flush()
 
-  assert.equal(bar(harness).style.display, 'flex', 'still in multi-select')
+  assert.ok(bar(harness), 'still in multi-select')
   assert.equal(toasts(harness).length, 1, 'the failure is reported')
   assert.match(toasts(harness)[0], /relocate exploded/)
 })
@@ -1508,17 +1548,17 @@ test('Escape stays inert while a move is running', async () => {
   clickRowIn(harness, first)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
 
   harness.document.dispatchToDocument('keydown', { key: 'Escape', stopPropagation() {} })
   await flush()
-  assert.equal(bar(harness).style.display, 'flex', 'Escape is ignored mid-move')
+  assert.ok(bar(harness), 'Escape is ignored mid-move')
 
   finish({ moved: 1, failed: 0, skipped: 0, total: 1, results: [] })
   await flush()
   await flush()
-  assert.notEqual(bar(harness).style.display, 'flex', 'and the mode ends when the move does')
+  assert.equal(bar(harness), null, 'and the mode ends when the move does')
 })
 
 // --- the result contract is enforced, not guessed ---------------------------
@@ -1531,12 +1571,12 @@ test('the older "cancelled" spelling of the cancel flag is still honoured', asyn
   clickRowIn(harness, first)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
   await flush()
 
   assert.deepEqual(toasts(harness), [], 'silent, exactly like the "canceled" spelling')
-  assert.equal(bar(harness).style.display, 'flex', 'still in multi-select')
+  assert.ok(bar(harness), 'still in multi-select')
 })
 
 test('a result without the agreed counts is reported instead of guessed', async () => {
@@ -1549,7 +1589,7 @@ test('a result without the agreed counts is reported instead of guessed', async 
   clickRowIn(harness, first)
   await flush()
 
-  barMove(harness).fire('click', { stopPropagation() {} })
+  clickBar(barMove(harness))
   await flush()
   await flush()
 
@@ -1944,4 +1984,232 @@ test('the page ends with a quiet link to the repository', async () => {
   assert.equal(cta.props.target, '_blank')
   assert.equal(cta.props.rel, 'noreferrer')
   assert.equal(cta.props.children, '行，给你一颗 Star')
+})
+
+// --- the batch bar occupies the official footer seat ------------------------
+//
+// It used to be a floating card injected into `document.body`, and for a while it
+// measured the sidebar footer and covered it. Both were the same mistake: a plugin
+// guessing at host layout. The bar is a slot occupant now - the host places it, so
+// there is nothing to measure, dock, hide or restore.
+
+test('the bar registers into the official footer slot with a locale', async () => {
+  const harness = await loadPlugin()
+  const entry = footerEntry(harness)
+
+  assert.ok(entry, 'the footer seat is occupied by a registration')
+  assert.equal(entry.spec.id, 'dsh-delete-session-bulkbar')
+  assert.equal(entry.spec.locale, NS, 'and it asks for the plugin locale namespace')
+  assert.equal(typeof entry.Component, 'function')
+})
+
+test('the footer stays empty until multi-select starts', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  assert.equal(bar(harness), null, 'nothing is rendered into the footer outside the mode')
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  assert.ok(bar(harness), 'and it appears the moment the mode starts')
+})
+
+test('the footer is empty again once the mode ends', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+  assert.ok(bar(harness), 'the bar is there while selecting')
+
+  clickBar(barCancel(harness))
+
+  assert.equal(bar(harness), null, 'and leaves the footer as it found it')
+})
+
+test('the bar reads the count from the store, not from the DOM', async () => {
+  const harness = await loadPlugin()
+  const first = mountRow(harness, SESSION_A)
+  mountRow(harness, SESSION_B)
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  assert.equal(barCount(harness).props.children, '已选 0 个', 'nothing selected yet')
+
+  harness.document.dispatchToDocument('click', {
+    target: first,
+    preventDefault() {},
+    stopPropagation() {},
+  })
+  await flush()
+
+  assert.equal(barCount(harness).props.children, '已选 1 个', 'the same store the rows write to')
+})
+
+test('the plugin no longer injects a bar element into the document', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  // Render the occupant first: a component that only misbehaves when the host
+  // actually mounts it would otherwise slip past this check.
+  assert.ok(bar(harness), 'the footer occupant renders')
+
+  const injected = walk(harness.document.body).filter((node) => node._classes.has('dsdel-bar'))
+  assert.deepEqual(injected, [], 'no DOM bar: the footer slot is the only home')
+})
+
+// --- the bar replaces the account row instead of stacking above it ----------
+
+test('selecting puts a marker on the page so the account row can step aside', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  // The bar shares the sidebar foot with the account chip, so leaving the chip in
+  // place stacks two rows. The marker is what lets one stylesheet rule hide it,
+  // instead of measuring the host's box and covering it.
+  assert.equal(harness.document.body._classes.has('dsdel-selecting'), true, 'the page is marked')
+})
+
+test('leaving selection takes the marker away again', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+
+  selectRow(harness).element.props.onSelect()
+  await flush()
+  clickBar(barCancel(harness))
+
+  assert.equal(harness.document.body._classes.has('dsdel-selecting'), false, 'the account row comes back')
+})
+
+test('the injected stylesheet hides the account row while the marker is on', async () => {
+  const harness = await loadPlugin()
+  // `ensureStyle` tags its <style> through `dataset.dshDeleteSession = '1'`.
+  const style = harness.document.head.querySelector('[data-dsh-delete-session="1"]')
+  assert.ok(style, 'the plugin injected its stylesheet')
+  const css = String(style._text ?? '')
+
+  // The foot stacks the action row, the usage card and the account row; only the
+  // action row survives, so the bar ends the sidebar where the account row did.
+  assert.match(
+    css,
+    /body\.dsdel-selecting \[class\*="_footArea"\] > \*:not\(\[class\*="_footerActions"\]\)/,
+    'the usage card and the account row step aside',
+  )
+  // The other footer buttons live in a slot container marked `display: contents`.
+  // They are named POSITIVELY — by the attributes their own plugins set — never by
+  // "everything except the bar": the bar is not a direct child of that container,
+  // and an exclusion rule hid it together with its Cancel button.
+  assert.match(
+    css,
+    /body\.dsdel-selecting \[data-slot="sidebar\.footer\.action"\] > \[data-dsh-plugin\]/,
+    'other plugins\' footer buttons are named one by one',
+  )
+  assert.doesNotMatch(
+    css,
+    /\[data-slot="sidebar\.footer\.action"\] > \*:not\(/,
+    'no exclusion rule may touch that slot — it cannot tell the bar apart',
+  )
+  assert.match(css, /display:\s*none/, 'both rules hide rather than shift')
+})
+
+test('the stylesheet never hides the bar itself', async () => {
+  const harness = await loadPlugin()
+  const style = harness.document.head.querySelector('[data-dsh-delete-session="1"]')
+  const css = String(style._text ?? '')
+
+  // Nothing may hide the footer by exclusion. Three attempts at "everything
+  // except the bar" took the bar itself down, because the bar is not a direct
+  // child of the container those rules addressed.
+  assert.doesNotMatch(
+    css,
+    /\[class\*="_footerActions"\] > \*:not\(\.dsdel-bar\)/,
+    'no rule may target the bar as a direct child of the action row',
+  )
+  assert.doesNotMatch(
+    css,
+    /\[class\*="_footerActions"\] > \*:not\(:has/,
+    'nor hide the action row wholesale',
+  )
+  assert.doesNotMatch(
+    css,
+    /\[data-slot="sidebar\.footer\.action"\] > \*:not\(\.dsdel-bar\)/,
+    'nor the slot container by exclusion',
+  )
+  // The bar itself must be addressed by nothing but its own appearance rules.
+  assert.doesNotMatch(
+    css,
+    /body\.dsdel-selecting [^{]*\.dsdel-bar\b(?!-)/,
+    'no selecting-state rule names the bar at all',
+  )
+})
+
+test('an interpolating host translator never receives our function entries', async () => {
+  const harness = await loadPlugin()
+  const dict = harness.locales[NS].zh
+  // `dsh-client-locale` interpolates whatever it finds as soon as params are
+  // given: it calls `template.replace(...)`. Handing it a function-valued entry
+  // throws "template.replace is not a function", and a slot entry that throws is
+  // replaced by the host's `data-slot-error` anchor — the bar vanishes whole.
+  const strict = (key, params) => {
+    const value = dict[key]
+    if (value === undefined) return key
+    if (params === undefined) return value
+    return value.replace(/\{(\w+)\}/g, (match, name) => (params && name in params ? String(params[name]) : match))
+  }
+
+  mountRow(harness, SESSION_A)
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  const node = footerEntry(harness).Component({ t: strict })
+  assert.ok(node, 'the bar still renders')
+  assert.equal(node.props.children[0].props.children, '已选 0 个', 'and the count is formatted locally')
+})
+
+test('a placeholder string is interpolated locally, not by the host', async () => {
+  const harness = await loadPlugin({ children: CHILDREN })
+  const dict = harness.locales[NS].zh
+  const strict = (key, params) => {
+    const value = dict[key]
+    if (value === undefined) return key
+    if (params === undefined) return value
+    return value.replace(/{(w+)}/g, (match, name) => (params && name in params ? String(params[name]) : match))
+  }
+
+  const row = mountRow(harness, SESSION_A)
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  // `childrenHint` is the one template-with-placeholder in the dictionary; the
+  // host must not be asked to fill it, or it would receive a function entry.
+  const dialogEntry = harness.slotRegistrations.find(
+    (entry) => entry.spec.name === 'shell.overlay' && entry.spec.id === `${NS}-dialog`,
+  )
+  const modal = dialogEntry.Component({ t: strict })
+  const kids = (modal.props.children ?? []).filter(Boolean)
+  const section = kids.find((child) => child.props && child.props.key === 'children')
+  assert.ok(section, 'the child list renders')
+  assert.equal(section.props.children[0].props.children, '这个对话有 2 个子会话（子代理），勾选的会一起删除。')
+  assert.ok(row)
+})
+
+test('the bar buttons keep their width instead of wrapping', async () => {
+  const harness = await loadPlugin()
+  const style = harness.document.head.querySelector('[data-dsh-delete-session="1"]')
+  const css = String(style._text ?? '')
+
+  // In a flex row the buttons are the only shrinkable things next to a growing
+  // count, so a long progress label squeezed them into two-character columns.
+  assert.match(css, /\.dsdel-bar-btn\{[^}]*flex:0 0 auto/, 'buttons never shrink')
+  assert.match(css, /\.dsdel-bar-btn\{[^}]*white-space:nowrap/, 'and never wrap their label')
+  assert.match(css, /\.dsdel-bar-count\{[^}]*text-overflow:ellipsis/, 'the count gives way instead')
 })
