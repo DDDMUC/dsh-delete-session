@@ -1215,3 +1215,98 @@ test('a child that is still open is left alone and reported as skipped', async (
   assert.equal(fs.existsSync(child.dir), true, 'a busy child is not deleted under its writer')
   assert.equal(result.children[0].skipped, 'busy', 'and the report says why')
 })
+
+// --- the folder picker belongs to the host, not to this plugin ---------------
+
+/**
+ * The host mounts `@deepseek-ai/dsh-host-directory-picker-auto` as
+ * `ctx.directoryPicker`; its capability says which interaction the deployment
+ * supports. Native deployments open one OS chooser, browse deployments serve a
+ * listing the page renders itself.
+ */
+const pickerContext = (capability) => ({
+  get: (name) => (name === 'directoryPicker' ? { capability: () => capability } : undefined),
+})
+
+test('a native host capability answers with the chosen directory', async () => {
+  // A real directory: the plugin still validates what the chooser hands back, so
+  // a path that vanished between the click and the answer is not accepted.
+  const chosen = fs.mkdtempSync(path.join(os.tmpdir(), 'dsdel-pick-'))
+  const ctx = pickerContext({ kind: 'native', pick: async () => chosen })
+
+  const result = await internals.pickFolder(ctx)
+
+  assert.deepEqual(result, { cancelled: false, path: path.resolve(chosen) })
+  fs.rmSync(chosen, { recursive: true, force: true })
+})
+
+test('a cancelled native chooser is reported, not thrown', async () => {
+  const ctx = pickerContext({ kind: 'native', pick: async () => null })
+
+  const result = await internals.pickFolder(ctx)
+
+  assert.deepEqual(result, { cancelled: true, path: null })
+})
+
+test('a browse-only host asks the page to render its own picker', async () => {
+  const ctx = pickerContext({ kind: 'browse', list: async () => [] })
+
+  const result = await internals.pickFolder(ctx)
+
+  assert.equal(result.browse, true, 'the in-page picker takes over')
+})
+
+test('a host without the service is reported as unsupported', async () => {
+  for (const ctx of [{ get: () => undefined }, {}, null]) {
+    const result = await internals.pickFolder(ctx)
+    assert.equal(result.unsupported, true)
+  }
+})
+
+test('a capability that throws does not take the request down', async () => {
+  const ctx = { get: () => ({ capability: () => { throw new Error('boom') } }) }
+
+  const result = await internals.pickFolder(ctx)
+
+  assert.equal(result.unsupported, true)
+})
+
+test('this plugin no longer compiles or shells out a picker of its own', () => {
+  // The C# source, the compiler probe and the PowerShell fallback all existed
+  // only because the host's own chooser was not being used.
+  const source = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  // `findCsc` stays: the recycle-bin helper still compiles a C# program. Only the
+  // picker-specific machinery is gone.
+  for (const gone of ['PICK_CSHARP', 'PICK_EXE_SOURCE', 'PICK_SCRIPT', 'ensurePickerExe', 'pickFolderWithPowershell', 'pickFolderNative']) {
+    assert.equal(source.includes(gone), false, gone + ' should be gone')
+  }
+})
+
+// --- the picker call must hand the host a real signal ------------------------
+
+test('the native chooser is given a live abort signal', async () => {
+  // The host implementation starts with `if (signal.aborted) throw …`, so calling
+  // `pick()` with no argument throws "Cannot read properties of undefined
+  // (reading 'aborted')" — which surfaced as a bogus delete failure.
+  let seen
+  const ctx = {
+    get: (name) =>
+      name === 'directoryPicker'
+        ? {
+            capability: () => ({
+              kind: 'native',
+              pick: async (signal) => {
+                seen = signal
+                return null
+              },
+            }),
+          }
+        : undefined,
+  }
+
+  await internals.pickFolder(ctx)
+
+  assert.ok(seen, 'a signal was passed')
+  assert.equal(typeof seen.aborted, 'boolean', 'and it is an AbortSignal')
+  assert.equal(seen.aborted, false, 'not already aborted')
+})

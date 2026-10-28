@@ -282,9 +282,14 @@ async function loadPlugin(options = {}) {
     writable: true,
   })
   globalThis.MutationObserver = class {
-    constructor(callback) { this.callback = callback; observers.push(this) }
-    observe() {}
-    disconnect() {}
+    constructor(callback) {
+      this.callback = callback
+      this.target = null
+      this.options = null
+      observers.push(this)
+    }
+    observe(target, options) { this.target = target === undefined ? null : target; this.options = options === undefined ? null : options }
+    disconnect() { this.target = null }
   }
   // The plugin coalesces decorate passes through rAF. Run the callback on a real
   // microtask-free tick rather than synchronously: `scheduleDecorate` assigns the
@@ -331,7 +336,12 @@ async function loadPlugin(options = {}) {
     if (href.endsWith('/dsh-delete-session/pick')) {
       const pick = options.pick ?? { cancelled: true, path: null }
       if (pick.unsupported === true) {
-        return { ok: false, status: 501, json: async () => ({ ok: false, code: 'unsupported', error: '系统文件夹对话框只支持 Windows' }) }
+        return { ok: false, status: 200, json: async () => ({ ok: false, code: 'unsupported', error: '宿主没有 directoryPicker 服务' }) }
+      }
+      // A browse deployment: the host has no OS chooser to raise, so it tells the
+      // page to draw its own picker. Normal for a remote client.
+      if (pick.browse === true) {
+        return { ok: false, status: 200, json: async () => ({ ok: false, code: 'browse', error: '浏览式宿主' }) }
       }
       return { ok: true, status: 200, json: async () => ({ ok: true, ...pick }) }
     }
@@ -442,12 +452,20 @@ function makeStorage() {
  * from `data-row-key`, not from a React fiber; without this the plugin finds no
  * id and skips the row, which would make every assertion below pass vacuously.
  */
-function mountRow(harness, session = SESSION_A) {
+/** The host wraps the session rows in this container; the plugin watches it. */
+function mountList(harness) {
+  const list = harness.document.createElement('div')
+  list.className = 'hHd-Xa_regionArea'
+  harness.document.body.appendChild(list)
+  return list
+}
+
+function mountRow(harness, session = SESSION_A, parent = null) {
   const row = harness.document.createElement('div')
   row.className = 'session_row'
   row.setAttribute('role', 'treeitem')
   row.setAttribute('data-row-key', `session:${session.id}`)
-  harness.document.body.appendChild(row)
+  ;(parent ?? harness.document.body).appendChild(row)
   harness.rows.push(row)
   return row
 }
@@ -1906,12 +1924,12 @@ const childChecks = (harness) => {
   return section === undefined ? [] : collectChecks([section], harness)
 }
 
-test('the page offers to take child sessions with their parent, off by default', async () => {
+test('the page offers to take child sessions with their parent, on by default', async () => {
   const harness = await loadPlugin()
   const box = pageCheck(harness, 'syncChildren')
 
   assert.ok(box, 'the switch renders with the other delete controls')
-  assert.equal(box.props.checked, false, 'asking is the default')
+  assert.equal(box.props.checked, true, 'taking them along is the default')
   assert.equal(box.props.label, '同时删除子会话')
 
   box.props.onChange(true)
@@ -1920,6 +1938,7 @@ test('the page offers to take child sessions with their parent, off by default',
 
 test('with the switch off the dialog lists the children, ticked, for you to narrow', async () => {
   const harness = await loadPlugin({ children: CHILDREN })
+  localStorage.setItem(SYNC_CHILDREN_KEY, '0')
   mountRow(harness, SESSION_A)
 
   const { element } = deleteRow(harness, SESSION_A)
@@ -1933,6 +1952,7 @@ test('with the switch off the dialog lists the children, ticked, for you to narr
 
 test('unticking a child keeps it out of the delete', async () => {
   const harness = await loadPlugin({ children: CHILDREN })
+  localStorage.setItem(SYNC_CHILDREN_KEY, '0')
   mountRow(harness, SESSION_A)
 
   const { element } = deleteRow(harness, SESSION_A)
@@ -2176,6 +2196,7 @@ test('an interpolating host translator never receives our function entries', asy
 
 test('a placeholder string is interpolated locally, not by the host', async () => {
   const harness = await loadPlugin({ children: CHILDREN })
+  localStorage.setItem(SYNC_CHILDREN_KEY, '0')
   const dict = harness.locales[NS].zh
   const strict = (key, params) => {
     const value = dict[key]
@@ -2212,4 +2233,273 @@ test('the bar buttons keep their width instead of wrapping', async () => {
   assert.match(css, /\.dsdel-bar-btn\{[^}]*flex:0 0 auto/, 'buttons never shrink')
   assert.match(css, /\.dsdel-bar-btn\{[^}]*white-space:nowrap/, 'and never wrap their label')
   assert.match(css, /\.dsdel-bar-count\{[^}]*text-overflow:ellipsis/, 'the count gives way instead')
+})
+
+// --- drag a session onto the footer bar to delete it ------------------------
+
+/** Drag one mounted row the way the host starts a session drag. */
+const startRowDrag = (harness, row) => harness.document.dispatchToDocument('dragstart', {
+  target: row,
+  preventDefault() {},
+  stopPropagation() {},
+})
+
+const dropEvent = () => ({ preventDefault() {}, stopPropagation() {}, dataTransfer: { dropEffect: '' } })
+
+test('dragging a session row turns the footer into a drop target', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+
+  assert.equal(bar(harness), null, 'the footer is untouched before the drag')
+
+  startRowDrag(harness, row)
+  await flush()
+
+  const node = bar(harness)
+  assert.ok(node, 'the bar appears while a session is being dragged')
+  assert.match(String(node.props.className), /\bdsdel-drop\b/, 'as a drop target, not the selection bar')
+  assert.equal(harness.document.body._classes.has('dsdel-selecting'), true, 'and the account row steps aside')
+})
+
+test('hovering the bar shows that releasing will delete', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+
+  startRowDrag(harness, row)
+  await flush()
+  assert.doesNotMatch(String(bar(harness).props.className), /dsdel-drop-over/, 'not armed yet')
+
+  bar(harness).props.onDragOver(dropEvent())
+  await flush()
+
+  const node = bar(harness)
+  assert.match(String(node.props.className), /dsdel-drop-over/, 'armed once the pointer is over it')
+  const text = JSON.stringify(node.props.children)
+  assert.match(text, /松手删除/, 'and the line says so')
+})
+
+test('leaving the bar disarms it again', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+
+  startRowDrag(harness, row)
+  await flush()
+  bar(harness).props.onDragOver(dropEvent())
+  await flush()
+  bar(harness).props.onDragLeave(dropEvent())
+  await flush()
+
+  assert.doesNotMatch(String(bar(harness).props.className), /dsdel-drop-over/)
+})
+
+test('dropping asks first unless the user turned asking off', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+
+  startRowDrag(harness, row)
+  await flush()
+  bar(harness).props.onDrop(dropEvent())
+  await flush()
+
+  assert.ok(dialogParts(harness), 'the confirmation dialog opens — the same rule as the menu row')
+  assert.equal(deleteCalls(harness), 0, 'and nothing is deleted yet')
+})
+
+test('dropping deletes straight away when asking is off', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(SKIP_KEY, '1')
+  const row = mountRow(harness, SESSION_A)
+
+  startRowDrag(harness, row)
+  await flush()
+  bar(harness).props.onDrop(dropEvent())
+  await flush()
+
+  assert.equal(deleteCalls(harness), 1, 'one delete goes out')
+  assert.equal(dialogParts(harness), null, 'with no dialog')
+})
+
+test('ending the drag without dropping puts the footer back', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+
+  startRowDrag(harness, row)
+  await flush()
+  harness.document.dispatchToDocument('dragend', { target: row, preventDefault() {}, stopPropagation() {} })
+  await flush()
+
+  assert.equal(bar(harness), null, 'the footer is empty again')
+  assert.equal(harness.document.body._classes.has('dsdel-selecting'), false, 'and the account row is back')
+})
+
+test('a drag started during multi-select is left alone', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  const barBefore = bar(harness)
+  assert.match(String(barBefore.props.className), /\bdsdel-bar\b/)
+
+  startRowDrag(harness, harness.rows[0])
+  await flush()
+
+  assert.doesNotMatch(String(bar(harness).props.className), /\bdsdel-drop\b/, 'reordering inside the mode is not a delete')
+})
+
+// --- performance: the decorate pass must stay cheap --------------------------
+
+test('the row observer watches the session list, not the whole document', async () => {
+  const harness = await loadPlugin()
+  const list = mountList(harness)
+  mountRow(harness, SESSION_A, list)
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  const observer = harness.observers[0]
+  assert.ok(observer, 'multi-select installs one observer')
+  // Observing `document.body` means every streamed token in the transcript wakes
+  // this callback. The list is the only subtree that can gain or lose rows.
+  assert.equal(
+    observer.target,
+    list,
+    'the list container is the observation root',
+  )
+})
+
+test('a mutation with no added or removed nodes schedules no pass', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  const observer = harness.observers[0]
+  let scanned = 0
+  const realQuery = harness.document.querySelectorAll.bind(harness.document)
+  harness.document.querySelectorAll = (selector) => {
+    if (selector === '[role="treeitem"]') scanned += 1
+    return realQuery(selector)
+  }
+
+  // A character-data mutation: text streaming, nothing structural.
+  observer.callback([{ type: 'characterData', addedNodes: [], removedNodes: [] }])
+  await flush()
+  assert.equal(scanned, 0, 'no row scan for a text-only mutation')
+
+  // A structural one still has to run.
+  observer.callback([{ type: 'childList', addedNodes: [harness.rows[0]], removedNodes: [] }])
+  await flush()
+  assert.equal(scanned, 1, 'one scan when a row arrives')
+})
+
+test('the decorate pass does not run a selector engine over every row', async () => {
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  selectRow(harness).element.props.onSelect()
+  await flush()
+
+  const row = harness.rows[0]
+  let rowSelectors = 0
+  const realQuery = row.querySelector.bind(row)
+  row.querySelector = (selector) => { rowSelectors += 1; return realQuery(selector) }
+
+  harness.observers[0].callback([{ type: 'childList', addedNodes: [row], removedNodes: [] }])
+  await flush()
+
+  // The checkbox is always the first element child; a per-row selector call per
+  // frame is the pass's dominant cost with a long list.
+  assert.equal(rowSelectors, 0, 'the checkbox is found without querying')
+})
+
+test('a browse-only host falls back to the in-page picker too', async () => {
+  // The host answered `browse`: it has a listing API but no OS chooser to raise.
+  // That is the normal shape for a remote client, so it must not read as an error.
+  const listing = { path: 'C:/ws', parent: 'C:/', entries: [], roots: ['C:/'], truncated: false, defaultRoot: 'C:/home' }
+  const harness = await loadPlugin({ browse: listing, pick: { browse: true } })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(ROOT_KEY, 'C:/ws')
+
+  pageRootBrowse(harness).props.onClick()
+  await tick()
+  await tick()
+
+  assert.ok(pickerElement(harness), 'the in-page picker opened')
+  assert.ok(browseRequests(harness).length > 0, 'and it asked the host for a listing')
+})
+
+test('a failing folder dialog says so instead of blaming the delete', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/dsh-delete-session/pick')) {
+      harness.requests.push({ url: String(url), init })
+      return {
+        ok: false,
+        status: 500,
+        json: async () => ({ ok: false, code: 'shell', error: "Cannot read properties of undefined (reading 'aborted')" }),
+      }
+    }
+    return originalFetch(url, init)
+  }
+
+  pageRootBrowse(harness).props.onClick()
+  await tick()
+  await tick()
+
+  const last = toasts(harness).at(-1)
+  assert.match(last, /选择文件夹失败/, 'the picker is named')
+  assert.doesNotMatch(last, /删除失败/, 'and deleting is not blamed for it')
+  assert.match(last, /aborted/, 'the host message is still carried through')
+})
+
+// --- first install: the four defaults --------------------------------------
+
+test('a fresh install ticks all four delete switches', async () => {
+  // No storage at all: this is what a new user sees on the plugin page.
+  const harness = await loadPlugin()
+
+  const expected = [
+    ['ask', '删除时询问', 'ask first'],
+    ['recycle', '删除至回收站', 'recycle bin'],
+    ['syncChildren', '同时删除子会话', 'take the subagent sessions along'],
+    ['off', '不处理产出文件（保持当前行为）', 'leave produced files alone'],
+  ]
+
+  for (const [key, label, why] of expected) {
+    const box = pageCheck(harness, key)
+    assert.ok(box, key + ' renders')
+    assert.equal(box.props.label, label)
+    assert.equal(box.props.checked, true, why)
+  }
+})
+
+test('unticking "take the child sessions along" is remembered', async () => {
+  const harness = await loadPlugin()
+  const box = pageCheck(harness, 'syncChildren')
+  assert.equal(box.props.checked, true, 'on by default')
+
+  box.props.onChange(false)
+  // The default is now "on", so the off choice has to be written explicitly:
+  // deleting the key would read back as on again.
+  assert.equal(localStorage.getItem(SYNC_CHILDREN_KEY), '0', 'off is written, not cleared')
+})
+
+test('a fresh install deletes the children without listing them', async () => {
+  const harness = await loadPlugin({ children: CHILDREN })
+  mountRow(harness, SESSION_A)
+
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  assert.deepEqual(childChecks(harness), [], 'no per-child ticks to narrow, because they all go')
+  dialogParts(harness).confirm.props.onClick()
+  await flush()
+
+  assert.deepEqual(
+    deleteBody(harness).childSessionIds,
+    ['session-child-one', 'session-child-two'],
+    'and the delete carries them',
+  )
 })

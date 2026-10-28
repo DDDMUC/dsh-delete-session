@@ -61,6 +61,9 @@ window.__ModuleLoader__.load({
       pageAsk: '删除时询问',
       pageRecycle: '删除至回收站',
       pageSyncChildren: '同时删除子会话',
+      dropHint: '拖到这里删除',
+      dropRelease: '松手删除「{name}」',
+      dropFallback: '这个对话',
       starAsk: '⭐ 顺手留颗 Star，作者能高兴一整天',
       starCta: '行，给你一颗 Star',
       pageSyncChildrenOn: '删除对话时，把它派生的子代理会话一起删掉。',
@@ -98,6 +101,7 @@ window.__ModuleLoader__.load({
       rootOpened: '已在文件管理器中打开',
       rootOpenFailed: '打开失败：',
       pickerOpening: '已打开系统文件夹对话框，请在弹出的窗口里选择',
+      pickerFailed: '选择文件夹失败：',
       pageRootReset: '用默认',
       pageRootDefaultHint: (path) => `当前使用默认路径：${path}`,
       pageRootCustomHint: '隔离夹会建在这个目录下，每次删除生成一个带时间戳的子目录',
@@ -155,6 +159,9 @@ window.__ModuleLoader__.load({
       pageAsk: 'Ask before deleting',
       pageRecycle: 'Delete to the Recycle Bin',
       pageSyncChildren: 'Delete child sessions too',
+      dropHint: 'Drop here to delete',
+      dropRelease: 'Release to delete \'{name}\'',
+      dropFallback: 'this conversation',
       starAsk: '⭐ A star would make the author\'s day',
       starCta: 'Fine — have one',
       pageSyncChildrenOn: 'A delete also removes the subagent sessions it spawned.',
@@ -190,6 +197,7 @@ window.__ModuleLoader__.load({
       rootOpened: 'Opened in the file manager',
       rootOpenFailed: 'Could not open: ',
       pickerOpening: 'The system folder dialog is open; pick a folder in that window',
+      pickerFailed: 'Could not open the folder picker: ',
       pageRootReset: 'Use default',
       pageRootDefaultHint: (path) => `Using the default path: ${path}`,
       pageRootCustomHint: 'The quarantine folder is created here, one timestamped subfolder per delete',
@@ -309,6 +317,11 @@ window.__ModuleLoader__.load({
       picker: null,
       /** The host's default quarantine root, fetched once so the card can name it. */
       defaultRoot: null,
+      /**
+       * The session being dragged over the footer, or null. `over` arms the drop:
+       * the bar only says "松手删除" once the pointer is actually on it.
+       */
+      drag: null,
     }
 
     const listeners = new Set()
@@ -322,6 +335,7 @@ window.__ModuleLoader__.load({
         batch: state.batch,
         picker: state.picker,
         defaultRoot: state.defaultRoot,
+        drag: state.drag,
         selectedCount: state.selected.size,
       }
     }
@@ -492,11 +506,13 @@ window.__ModuleLoader__.load({
      * a conversation of its own, so it is offered rather than swept up.
      */
     function syncChildren() {
-      return readPref(SYNC_CHILDREN_KEY, '0') === '1'
+      return readPref(SYNC_CHILDREN_KEY, '1') !== '0'
     }
 
     function setSyncChildren(on) {
-      writePref(SYNC_CHILDREN_KEY, on ? '1' : null)
+      // "Off" is written as '0' rather than cleared: the default is now on, so a
+      // removed key would read back as on again.
+      writePref(SYNC_CHILDREN_KEY, on ? '1' : '0')
     }
 
     /** The chosen quarantine root, or '' for "use the host default". */
@@ -687,6 +703,10 @@ window.__ModuleLoader__.load({
       // exclusion rule silently hid the bar together with its Cancel button.
       'body.dsdel-selecting [data-slot="sidebar.footer.action"] > [data-dsh-plugin]{display:none}',
       'body.dsdel-selecting [data-slot="sidebar.footer.action"] > [class*="_entryRow"]{display:none}',
+      '.dsdel-drop{border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.4));border-radius:8px;color:var(--dsw-alias-label-secondary,inherit)}',
+      '.dsdel-drop-over{border-color:var(--dsw-alias-state-error-primary,#e5484d);border-style:solid;background:rgba(229,72,77,.10);color:var(--dsw-alias-state-error-primary,#e5484d)}',
+      '.dsdel-drop-icon{display:inline-flex;flex:0 0 auto;align-items:center}',
+      '.dsdel-drop-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dsdel-bar-count{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary,inherit)}',
       '.dsdel-bar-btn{flex:0 0 auto;white-space:nowrap;appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
       '.dsdel-bar-btn:disabled{opacity:.5;cursor:default}',
@@ -774,6 +794,56 @@ window.__ModuleLoader__.load({
       return id === '' ? null : id
     }
 
+    // --- drag a session onto the footer to delete it ---------------------------
+    //
+    // The id comes from the host's own `data-row-key`, never from `dataTransfer`:
+    // the official drag only reorders, and a dragover payload is unreadable anyway.
+    // The gesture ends in the same place as the menu row - the confirmation dialog
+    // unless the user turned asking off - so there is exactly one delete policy.
+
+    /** The row under the pointer, with the title the drop target can name. */
+    function draggedSession(event) {
+      const target = event === null || event === undefined ? null : event.target
+      const row = target && typeof target.closest === 'function'
+        ? target.closest('[role="treeitem"]')
+        : null
+      const sessionId = sessionIdFromRow(row)
+      if (sessionId === null) return null
+      const text = row !== null && typeof row.textContent === 'string' ? row.textContent.trim() : ''
+      const title = text === '' ? null : text.slice(0, 40)
+      return { sessionId, title }
+    }
+
+    function onDragStartCapture(event) {
+      // Inside multi-select a drag is the host reordering rows; deleting on drop
+      // would make the mode quietly destructive.
+      if (state.selecting) return
+      const info = draggedSession(event)
+      if (info === null) return
+      state.drag = { sessionId: info.sessionId, title: info.title, over: false }
+      syncFooterMode()
+      publish()
+    }
+
+    function onDragEndCapture() {
+      if (state.drag === null) return
+      state.drag = null
+      syncFooterMode()
+      publish()
+    }
+
+    /** Drop on the bar: same policy as the menu row. */
+    function dropToDelete() {
+      const drag = state.drag
+      if (drag === null) return
+      state.drag = null
+      syncFooterMode()
+      publish()
+      const needsDialog = !artifactsOff() && !artifactsAuto()
+      if (skipConfirm() && !needsDialog) deleteNow({ sessionId: drag.sessionId })
+      else openDeleteDialog(drag.sessionId, drag.title)
+    }
+
     function decorateRows() {
       if (typeof document === 'undefined') return
       const rows = document.querySelectorAll('[role="treeitem"]')
@@ -782,14 +852,22 @@ window.__ModuleLoader__.load({
         if (!id) return
         // Checkboxes belong to multi-select only: a single delete (or any other
         // decorate pass outside the mode) must not plant them on every row.
+        // The checkbox is always the row's first element child, so it is read
+        // through the pointer. `querySelector` here ran twice per row per frame,
+        // which is the pass's dominant cost once the list is long.
+        const first = row.firstElementChild
+        const existing = first !== null && first !== undefined
+          && first.classList
+          && first.classList.contains(DEL_CHECK)
+          ? first
+          : null
         if (!state.selecting) {
-          const stray = row.querySelector(':scope > .dsdel-check')
-          if (stray) stray.remove()
+          if (existing !== null) existing.remove()
         } else {
-          let check = row.querySelector(':scope > .dsdel-check')
+          let check = existing
           if (!check) {
             check = document.createElement('span')
-            check.className = 'dsdel-check'
+            check.className = DEL_CHECK
             check.setAttribute('data-dsh-delete-session', 'check')
             row.insertBefore(check, row.firstChild)
           }
@@ -801,6 +879,24 @@ window.__ModuleLoader__.load({
         document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
       }
     }
+    /**
+     * A mutation batch only matters when a node came or went. Text streaming
+     * inside the transcript produces characterData records forever; scheduling a
+     * full row scan for those would burn a frame's budget on every token.
+     */
+    function onRowMutations(records) {
+      if (records === undefined || records === null) return scheduleDecorate()
+      for (const record of records) {
+        const added = record === null || record === undefined ? null : record.addedNodes
+        const removed = record === null || record === undefined ? null : record.removedNodes
+        if ((added !== null && added !== undefined && added.length > 0)
+          || (removed !== null && removed !== undefined && removed.length > 0)) {
+          scheduleDecorate()
+          return
+        }
+      }
+    }
+
     function scheduleDecorate() {
       if (typeof requestAnimationFrame !== 'function') return
       if (decorateRaf !== null) return
@@ -834,6 +930,42 @@ window.__ModuleLoader__.load({
     function BulkBar({ t: injected }) {
       const translate = localizedTranslator(injected)
       const view = useSnapshot()
+      // A session dragged over the sidebar turns the footer into a drop target.
+      if (view.drag !== null && view.drag !== undefined) {
+        const armed = view.drag.over === true
+        const name = view.drag.title === null || view.drag.title === undefined
+          ? translate('dropFallback')
+          : view.drag.title
+        return h('div', {
+          className: armed ? 'dsdel-bar dsdel-drop dsdel-drop-over' : 'dsdel-bar dsdel-drop',
+          role: 'toolbar',
+          onDragOver: (event) => {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault()
+            if (event && event.dataTransfer) {
+              try { event.dataTransfer.dropEffect = 'move' } catch { /* read-only */ }
+            }
+            if (state.drag !== null && state.drag.over !== true) {
+              state.drag.over = true
+              publish()
+            }
+          },
+          onDragLeave: () => {
+            if (state.drag !== null && state.drag.over !== false) {
+              state.drag.over = false
+              publish()
+            }
+          },
+          onDrop: (event) => {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault()
+            if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+            dropToDelete()
+          },
+        },
+          h('span', { key: 'icon', className: 'dsdel-drop-icon' }, glyph(TRASH_PATHS)),
+          h('span', { key: 'text', className: 'dsdel-drop-text' },
+            armed ? translate('dropRelease', name) : translate('dropHint', name)),
+        )
+      }
       // Outside selection mode the footer keeps its normal face.
       if (!view.selecting) return null
       const busy = view.batch !== null
@@ -918,17 +1050,30 @@ window.__ModuleLoader__.load({
       else classes.remove('dsdel-selecting')
     }
 
+    /** The footer is ours while selecting or while a session is dragged over it. */
+    function syncFooterMode() {
+      markSelecting(state.selecting || state.drag !== null)
+    }
+
     function enterSelection() {
       if (state.selecting) return
       state.selecting = true
       state.selected.clear()
       ensureStyle()
-      markSelecting(true)
+      syncFooterMode()
       document.addEventListener('click', onSelectClickCapture, true)
       document.addEventListener('keydown', onSelectKeydown, true)
       if (typeof MutationObserver === 'function') {
-        rowObserver = new MutationObserver(scheduleDecorate)
-        rowObserver.observe(document.body, { childList: true, subtree: true })
+        rowObserver = new MutationObserver(onRowMutations)
+        // Observation root is the list, not the document: the transcript below
+        // streams tokens continuously and would otherwise wake this on every one.
+        const list = typeof document.querySelector === 'function'
+          ? document.querySelector(LIST_SELECTOR)
+          : null
+        rowObserver.observe(list !== null && list !== undefined ? list : document.body, {
+          childList: true,
+          subtree: true,
+        })
       }
       publish()
     }
@@ -943,7 +1088,7 @@ window.__ModuleLoader__.load({
         state.pending.clear()
         document.querySelectorAll('.dsdel-row-pending').forEach((el) => el.classList.remove('dsdel-row-pending'))
       }
-      markSelecting(false)
+      syncFooterMode()
       document.removeEventListener('click', onSelectClickCapture, true)
       document.removeEventListener('keydown', onSelectKeydown, true)
       if (rowObserver) { rowObserver.disconnect(); rowObserver = null }
@@ -1293,11 +1438,16 @@ window.__ModuleLoader__.load({
           toast(t('rootSet'))
         })
         .catch((reason) => {
-          if (reason && reason.code === 'unsupported') {
+          // Two host answers mean "use the page picker instead": `unsupported`
+          // (no directoryPicker service at all) and `browse` (the service exists
+          // but serves listings, which is what a remote client gets). Neither is
+          // a failure, so neither may surface as a toast.
+          if (reason && (reason.code === 'unsupported' || reason.code === 'browse')) {
             openPicker()
             return
           }
-          toast(t('failed') + String((reason && reason.message) || reason), true)
+          // Nothing was deleted here, so the delete wording would mislead.
+          toast(t('pickerFailed') + String((reason && reason.message) || reason), true)
         })
         .finally(() => {
           folderDialogOpen = false
@@ -1370,6 +1520,11 @@ window.__ModuleLoader__.load({
     }
 
     // --- menu rows (slot: sidebar.workspaces.session.menu.item) ----------------
+
+    /** The sidebar list container; hashed class name, matched by its suffix. */
+    const LIST_SELECTOR = '[class*="_regionArea"]'
+    /** Marks a row checkbox this plugin planted. */
+    const DEL_CHECK = 'dsdel-check'
 
     /** Inline glyphs for the two rows; the host exposes no matching pair. */
     const TRASH_PATHS = ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13', 'M9 7V4h6v3']
@@ -1936,6 +2091,12 @@ window.__ModuleLoader__.load({
       }
 
       const install = (slots) => {
+        // The drag gesture is document-wide (the row is not ours), so these are
+        // plain capture listeners rather than slot handlers.
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+          document.addEventListener('dragstart', onDragStartCapture, true)
+          document.addEventListener('dragend', onDragEndCapture, true)
+        }
         // Session menu rows. A package-namespaced id keeps them beside the
         // shipped pin(100)/rename(200)/fork(300)/archive(400)/session-id(450).
         slots.inject('sidebar.workspaces.session.menu.item', () => slots.register(
@@ -1971,6 +2132,12 @@ window.__ModuleLoader__.load({
 
         // Leaving the mode disconnects the row observer and strips the checkboxes.
         return () => {
+          if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+            document.removeEventListener('dragstart', onDragStartCapture, true)
+            document.removeEventListener('dragend', onDragEndCapture, true)
+          }
+          state.drag = null
+          syncFooterMode()
           exitSelection()
         }
       }

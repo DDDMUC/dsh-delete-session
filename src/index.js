@@ -258,6 +258,20 @@ public static class Program {
 const RECYCLE_EXE_VERSION = 1
 const RECYCLE_TIMEOUT_MS = 60 * 1000
 
+/** The C# compiler that ships with .NET Framework, if this machine has it. */
+function findCsc() {
+  const windir = process.env.WINDIR || 'C:\\Windows'
+  for (const flavor of ['Framework64', 'Framework']) {
+    const candidate = path.join(windir, 'Microsoft.NET', flavor, 'v4.0.30319', 'csc.exe')
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate
+    } catch {
+      // try the next flavour
+    }
+  }
+  return null
+}
+
 /** Compile the recycle helper once into the DSH cache; null when it cannot. */
 async function ensureRecycleExe() {
   if (process.platform !== 'win32') return null
@@ -300,7 +314,6 @@ async function ensureRecycleExe() {
 function warmCompiledHelpers() {
   if (process.platform !== 'win32') return
   const warm = async () => {
-    try { await ensurePickerExe() } catch { /* the fallback covers it */ }
     try { await ensureRecycleExe() } catch { /* the fallback covers it */ }
   }
   void warm()
@@ -393,7 +406,7 @@ async function sendToRecycleBin(targets) {
     await fsp.writeFile(scriptPath, bytes)
     output = await runPowershell(
       ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
-      PICK_TIMEOUT_MS,
+      SHELL_TIMEOUT_MS,
     )
   } catch {
     return false
@@ -849,234 +862,10 @@ const MAX_LISTED = 500
 const RESOLVE_CONCURRENCY = 16
 /** How many directories the folder picker lists before saying there are more. */
 const MAX_BROWSE_ENTRIES = 500
-/** How long a native folder dialog may stay open before the request gives up. */
+/** How long the OS chooser may stay open before the request gives up on it. */
 const PICK_TIMEOUT_MS = 5 * 60 * 1000
-
-/**
- * The folder picker.
- *
- * Windows offers its modern chooser through COM (`IFileOpenDialog` +
- * `FOS_PICKFOLDERS`), and the interesting part is not the dialog but the wait
- * before it. Measured on the target machine:
- *
- *   PowerShell startup ......... ~520 ms
- *   + Windows.Forms assembly .... ~950 ms   (left over from the old
- *                                            `FolderBrowserDialog` version)
- *   compiled .exe, no console ... ~120 ms
- *
- * So the picker is a tiny executable: compiled once into the DSH home, spawned
- * directly afterwards. The PowerShell script below stays as the fallback for a
- * machine without `csc.exe`.
- *
- * The executable runs with `windowsHide`, which hides the first window it shows,
- * so a background thread calls `ShowWindow(SW_SHOW)` and raises it. That thread
- * also centres the dialog and retries, because the window reports no final size
- * on the first tick.
- */
-const PICK_CSHARP = `
-using System;
-using System.Text;
-using System.Threading;
-using System.Runtime.InteropServices;
-
-public static class DshFolderPick {
-  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
-  [DllImport("user32.dll")] static extern IntPtr SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
-  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
-  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
-  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] static extern bool SystemParametersInfoW(uint action, uint param, out RECT rect, uint winIni);
-  [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
-  delegate bool EnumProc(IntPtr h, IntPtr l);
-
-  [StructLayout(LayoutKind.Sequential)]
-  struct RECT { public int Left, Top, Right, Bottom; }
-
-  static IntPtr FindDialog() {
-    uint me = GetCurrentProcessId();
-    IntPtr found = IntPtr.Zero;
-    EnumWindows((h, l) => {
-      uint pid;
-      GetWindowThreadProcessId(h, out pid);
-      if (pid == me) {
-        var cls = new StringBuilder(128, 128);
-        GetClassNameW(h, cls, 128);
-        if (cls.ToString().StartsWith("#32770") && found == IntPtr.Zero) found = h;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return found;
-  }
-
-  static void Raise() {
-    bool centered = false;
-    for (int i = 0; i < 80; i++) {
-      Thread.Sleep(150);
-      IntPtr h = FindDialog();
-      if (h == IntPtr.Zero) continue;
-      ShowWindow(h, 5);
-      if (!centered) {
-        RECT work, box;
-        if (SystemParametersInfoW(0x0030, 0, out work, 0) && GetWindowRect(h, out box)) {
-          int w = box.Right - box.Left;
-          int ht = box.Bottom - box.Top;
-          int availW = work.Right - work.Left;
-          int availH = work.Bottom - work.Top;
-          // A half-built rect would park the window off screen, so only a
-          // believable size that actually fits is allowed to move it.
-          if (w > 600 && ht > 300 && w < availW && ht < availH) {
-            int x = work.Left + (availW - w) / 2;
-            int y = work.Top + (availH - ht) / 2;
-            SetWindowPos(h, (IntPtr)(-1), x, y, 0, 0, 0x0001);
-            centered = true;
-          }
-        }
-      }
-      SetWindowPos(h, (IntPtr)(-1), 0, 0, 0, 0, 0x0003);
-      BringWindowToTop(h);
-    }
-  }
-
-  [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  interface IFileOpenDialog {
-    [PreserveSig] int Show(IntPtr parent);
-    void SetFileTypes(uint c, IntPtr f);
-    void SetFileTypeIndex(uint i);
-    void GetFileTypeIndex(out uint i);
-    void Advise(IntPtr p, out uint c);
-    void Unadvise(uint c);
-    void SetOptions(uint fos);
-    void GetOptions(out uint fos);
-    void SetDefaultFolder(IShellItem i);
-    void SetFolder(IShellItem i);
-    void GetFolder(out IShellItem i);
-    void GetCurrentSelection(out IShellItem i);
-    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string n);
-    void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string n);
-    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string t);
-    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string t);
-    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string t);
-    void GetResult(out IShellItem i);
-    void AddPlace(IShellItem i, uint f);
-    void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string e);
-    void Close(int hr);
-    void SetClientGuid(ref Guid g);
-    void ClearClientData();
-    void SetFilter(IntPtr f);
-  }
-
-  [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  interface IShellItem {
-    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
-    void GetParent(out IShellItem ppsi);
-    void GetDisplayName(uint sigdn, out IntPtr name);
-    void GetAttributes(uint mask, out uint attrs);
-    void Compare(IShellItem psi, uint hint, out int order);
-  }
-
-  [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
-  class FileOpenDialog { }
-
-  public static string Show(string title, string okLabel) {
-    var raiser = new Thread(Raise);
-    raiser.IsBackground = true;
-    raiser.Start();
-
-    var dialog = (IFileOpenDialog)new FileOpenDialog();
-    uint options;
-    dialog.GetOptions(out options);
-    dialog.SetOptions(options | 0x20u | 0x40u | 0x800u);
-    if (title != null) dialog.SetTitle(title);
-    if (okLabel != null) dialog.SetOkButtonLabel(okLabel);
-
-    int hr = dialog.Show(IntPtr.Zero);
-    if (hr != 0) return null;
-
-    IShellItem item;
-    dialog.GetResult(out item);
-    IntPtr name;
-    item.GetDisplayName(0x80058000u, out name);
-    string path = Marshal.PtrToStringUni(name);
-    Marshal.FreeCoTaskMem(name);
-    return path;
-  }
-}`
-
-/** The compiled form: the class above plus an entry point that prints one path. */
-const PICK_EXE_SOURCE = PICK_CSHARP + `
-
-public static class Program {
-  public static int Main(string[] args) {
-    string picked = DshFolderPick.Show(args.Length > 0 ? args[0] : null, args.Length > 1 ? args[1] : null);
-    if (picked == null) return 1;
-    // Written as UTF-8 bytes rather than through Console.Out: its encoding
-    // depends on a console this process does not own, and paths are not ASCII.
-    byte[] bytes = System.Text.Encoding.UTF8.GetBytes(picked);
-    using (System.IO.Stream stdout = Console.OpenStandardOutput()) {
-      stdout.Write(bytes, 0, bytes.Length);
-      stdout.Flush();
-    }
-    return 0;
-  }
-}`
-
-/** The fallback for a host without `csc.exe`: the same class through PowerShell. */
-const PICK_SCRIPT = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$source = @'
-${PICK_CSHARP}
-'@
-Add-Type -TypeDefinition $source
-$picked = [DshFolderPick]::Show('选择隔离夹保存位置', '选择此文件夹')
-if ($picked) { [Console]::Out.Write($picked) }
-`
-
-/** Bump when `PICK_EXE_SOURCE` changes, so a cached build is not reused. */
-const PICK_EXE_VERSION = 1
-/** Compiling once is slow; it happens on the first ever pick only. */
-const PICK_COMPILE_TIMEOUT_MS = 60 * 1000
-
-/** The C# compiler that ships with .NET Framework, if this machine has it. */
-function findCsc() {
-  const windir = process.env.WINDIR || 'C:\\Windows'
-  for (const flavor of ['Framework64', 'Framework']) {
-    const candidate = path.join(windir, 'Microsoft.NET', flavor, 'v4.0.30319', 'csc.exe')
-    try {
-      if (fs.statSync(candidate).isFile()) return candidate
-    } catch {
-      // try the next flavour
-    }
-  }
-  return null
-}
-
-/**
- * Compile the picker once into `$DSH_HOME/cache/dsh-delete-session`, then reuse
- * it. Returns null when this machine cannot compile, so the caller falls back to
- * the PowerShell path rather than failing the pick.
- */
-async function ensurePickerExe() {
-  if (process.platform !== 'win32') return null
-  const dir = path.join(dshHome(), 'cache', 'dsh-delete-session', `v${PICK_EXE_VERSION}`)
-  const exe = path.join(dir, 'dsh-folder-pick.exe')
-  if (await pathExists(exe)) return exe
-  const csc = findCsc()
-  if (csc === null) return null
-  try {
-    await fsp.mkdir(dir, { recursive: true })
-    const source = path.join(dir, 'picker.cs')
-    await fsp.writeFile(source, PICK_EXE_SOURCE, 'utf8')
-    const built = await runExecutable(csc, ['-nologo', '-target:exe', `-out:${exe}`, '-r:System.dll', source], PICK_COMPILE_TIMEOUT_MS)
-    try { await fsp.rm(source, { force: true }) } catch { /* best effort */ }
-    if (built.code === 0) {
-      if (await pathExists(exe)) return exe
-    }
-  } catch {
-    // fall through to the PowerShell path
-  }
-  return null
-}
+/** How long a shell helper (the recycle-bin script) may run before giving up. */
+const SHELL_TIMEOUT_MS = 5 * 60 * 1000
 
 /** Run a program and collect its output, leaving the meaning of the exit to the caller. */
 function runExecutable(program, args, timeoutMs) {
@@ -1785,55 +1574,58 @@ function revealDirectory(directory) {
       ? { program: 'open', args: [directory] }
       : { program: 'xdg-open', args: [directory] }
   const child = spawn(opener.program, opener.args, { detached: true, stdio: 'ignore', windowsHide: false })
+  // Without this listener a failed spawn (explorer missing, blocked by security
+  // software) surfaces as an unhandled `error` event and takes the host down.
+  child.on('error', () => {})
   child.unref()
 }
 
 /**
- * The slow path: the same dialog through PowerShell. Windows PowerShell 5.1
- * reads a script file as UTF-8 only when it carries a BOM, and without one the
- * Chinese labels corrupt the run into a silent exit.
+ * Ask the host for a directory.
+ *
+ * DSH mounts `ctx.directoryPicker` (`@deepseek-ai/dsh-host-directory-picker-auto`),
+ * whose capability names the interaction this deployment supports: a native
+ * deployment opens one OS chooser, a browse deployment serves a listing the page
+ * draws itself. Consumers are meant to switch on `capability().kind`.
+ *
+ * This plugin used to compile its own C# chooser and fall back to PowerShell. That
+ * was a reimplementation of something the host already ships, it could not follow a
+ * remote deployment, and it needed a compiler on the machine at first use.
+ *
+ * @returns `{ cancelled, path }` from a native chooser, else `{ browse: true }` or
+ *          `{ unsupported: true }` so the page falls back to its own picker.
  */
-async function pickFolderWithPowershell() {
-  const scriptPath = path.join(os.tmpdir(), `dsh-delete-session-pick-${process.pid}-${Date.now()}.ps1`)
-  const bytes = Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(PICK_SCRIPT, 'utf8')])
-  await fsp.writeFile(scriptPath, bytes)
+async function pickFolder(ctx) {
+  const picker = ctx !== null && ctx !== undefined && typeof ctx.get === 'function'
+    ? ctx.get('directoryPicker')
+    : undefined
+  if (picker === null || picker === undefined || typeof picker.capability !== 'function') {
+    return { unsupported: true }
+  }
+  let capability
   try {
-    return await runPowershell(
-      ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
-      PICK_TIMEOUT_MS,
-    )
+    capability = picker.capability()
+  } catch {
+    return { unsupported: true }
+  }
+  if (capability === null || capability === undefined) return { unsupported: true }
+  if (capability.kind !== 'native' || typeof capability.pick !== 'function') return { browse: true }
+  // `pick(signal)` is mandatory: the host implementation begins with
+  // `if (signal.aborted) throw …`, so calling it bare throws a TypeError that
+  // reads like an unrelated failure ("… reading 'aborted'"). The timeout matches
+  // the one the previous PowerShell dialog used: a dialog nobody answers must not
+  // hold the request forever.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), PICK_TIMEOUT_MS)
+  let picked
+  try {
+    picked = await capability.pick(controller.signal)
   } finally {
-    try { await fsp.rm(scriptPath, { force: true }) } catch { /* best effort */ }
+    clearTimeout(timer)
   }
-}
-
-/**
- * Raise the real Windows folder picker and return what the user chose. The
- * browser cannot hand a page a filesystem path, but this process can ask the OS.
- * @returns `{ cancelled, path }`.
- */
-async function pickFolderNative() {
-  if (process.platform !== 'win32') {
-    throw new HttpError(501, 'unsupported', '系统文件夹对话框只支持 Windows，请改用浏览…')
-  }
-
-  // The compiled picker answers in ~120 ms; the PowerShell fallback costs a
-  // second before the dialog even appears, so it is only the second choice.
-  let picked = ''
-  const exe = await ensurePickerExe()
-  if (exe !== null) {
-    const run = await runExecutable(exe, ['选择隔离夹保存位置', '选择此文件夹'], PICK_TIMEOUT_MS)
-    // Exit 1 is a cancelled dialog; anything else means it never opened.
-    if (run.code !== 0 && run.code !== 1) {
-      throw new HttpError(500, 'shell', `系统对话框异常退出（${run.code}）`)
-    }
-    picked = run.code === 0 ? run.stdout : ''
-  } else {
-    picked = await pickFolderWithPowershell()
-  }
-  if (picked === '') return { cancelled: true, path: null }
-
-  const resolved = path.resolve(picked)
+  const chosen = typeof picked === 'string' && picked !== '' ? picked : null
+  if (chosen === null) return { cancelled: true, path: null }
+  const resolved = path.resolve(chosen)
   let info
   try {
     info = await fsp.stat(resolved)
@@ -1843,6 +1635,7 @@ async function pickFolderNative() {
   if (!info.isDirectory()) throw new HttpError(400, 'invalid', '选中的不是目录')
   return { cancelled: false, path: resolved }
 }
+
 
 // --- http --------------------------------------------------------------------
 
@@ -1971,7 +1764,15 @@ export function apply(ctx) {
           return
         }
         try {
-          const picked = await pickFolderNative()
+          const picked = await pickFolder(ctx)
+          if (picked.unsupported === true) {
+            sendJson(res, 200, { ok: false, code: 'unsupported', error: '宿主没有 directoryPicker 服务' })
+            return
+          }
+          if (picked.browse === true) {
+            sendJson(res, 200, { ok: false, code: 'browse', error: '浏览式宿主，请用页面内的选择器' })
+            return
+          }
           sendJson(res, 200, { ok: true, ...picked })
         } catch (error) {
           const status = error instanceof HttpError ? error.status : 500
@@ -2205,7 +2006,7 @@ export function apply(ctx) {
 // quarantine against a scratch tree and a stubbed persistence service. Nothing
 // else in the host reads this face.
 export const internals = {
-  ensurePickerExe,
+  pickFolder,
   claimQuarantineDirectory,
   classifyPaths,
   collectSessionPaths,
