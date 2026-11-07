@@ -113,6 +113,12 @@ window.__ModuleLoader__.load({
       pickerDefault: (path) => `默认路径：${path}`,
       rootSet: '保存位置已更新',
       artifactSection: '本对话产出的文件',
+      artifactOpenFolder: '打开所在文件夹',
+      artifactDeleteFile: '删除这个文件',
+      fileDeleted: '文件已删除',
+      fileRecycled: '文件已移入回收站',
+      fileDeleteFailed: '删除文件失败：',
+      revealFailed: '打开文件夹失败：',
       artifactLoading: '正在扫描…',
       artifactFailed: '扫描失败：',
       artifactNone: '没有需要处理的文件。',
@@ -209,6 +215,12 @@ window.__ModuleLoader__.load({
       pickerDefault: (path) => `Default path: ${path}`,
       rootSet: 'Location updated',
       artifactSection: 'Files this conversation produced',
+      artifactOpenFolder: 'Open containing folder',
+      artifactDeleteFile: 'Delete this file',
+      fileDeleted: 'File deleted',
+      fileRecycled: 'File moved to the recycle bin',
+      fileDeleteFailed: 'Could not delete the file: ',
+      revealFailed: 'Could not open the folder: ',
       artifactLoading: 'Scanning...',
       artifactFailed: 'Scan failed: ',
       artifactNone: 'Nothing to handle.',
@@ -593,6 +605,65 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** Drop one row from the dialog after its file left the disk. */
+    function forgetFile(sessionId, target) {
+      const dialog = state.dialog
+      if (dialog === null || dialog.sessionId !== sessionId) return
+      const artifacts = dialog.artifacts
+      if (artifacts === null || artifacts.plan === null) return
+      artifacts.selected.delete(target)
+      const keep = (row) => row.path !== target
+      artifacts.plan = {
+        ...artifacts.plan,
+        created: (artifacts.plan.created || []).filter(keep),
+        modified: (artifacts.plan.modified || []).filter(keep),
+      }
+      publish()
+    }
+
+    /** Delete one produced file, then drop its row. */
+    function deleteOneFile(sessionId, target) {
+      const recycle = recycleSession()
+      postDeleteFile(sessionId, target, recycle).then((data) => {
+        forgetFile(sessionId, target)
+        toast(t(data && data.recycled === true ? 'fileRecycled' : 'fileDeleted'))
+      }).catch((reason) => {
+        toast(t('fileDeleteFailed') + String((reason && reason.message) || reason), true)
+      })
+    }
+
+    /**
+     * Delete one produced file. The recycle choice is the same preference that
+     * governs a conversation delete, so the two never disagree.
+     */
+    function postDeleteFile(sessionId, target, recycle) {
+      return fetch('/dsh-delete-session/delete-file', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId, path: target, recycle }),
+      }).then(async (res) => {
+        let data = {}
+        try { data = await res.json() } catch { /* keep {} */ }
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`)
+        return data
+      })
+    }
+
+/**
+     * Show one produced file's folder. The host validates that the path is a
+     * directory; the browser has no path module, so the parent is taken with a
+     * plain last-separator split — Windows separators included.
+     */
+    function revealParent(filePath) {
+      const text = String(filePath === null || filePath === undefined ? '' : filePath).replace(/[\\/]+$/, '')
+      const cut = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+      const parent = cut > 0 ? text.slice(0, cut) : text
+      if (parent === '') return
+      postReveal(parent).catch((reason) => {
+        toast(t('revealFailed') + String((reason && reason.message) || reason), true)
+      })
+    }
+
     /** Show the quarantine folder the current settings would write to. */
     function openQuarantineRoot(target) {
       if (typeof target !== 'string' || target === '') return
@@ -686,7 +757,9 @@ window.__ModuleLoader__.load({
     // host's `Modal`, so it brings no backdrop CSS of its own.
 
     const CSS = [
-      '.dsdel-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 25%,transparent);padding:9px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:min(92vw,460px);cursor:pointer}',
+      '.dsdel-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#2b2b2b));color:var(--dsw-alias-label-primary,#fff);border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.3));padding:9px 16px;border-radius:10px;font-size:12.5px;line-height:18px;box-shadow:0 10px 28px rgba(0,0,0,.24);max-width:min(92vw,460px);cursor:pointer;animation:dsdel-toast-in .16s cubic-bezier(.2,.8,.3,1)}',
+      '@keyframes dsdel-toast-in{from{opacity:0;transform:translate(-50%,6px)}to{opacity:1;transform:translate(-50%,0)}}',
+      '@media (prefers-reduced-motion:reduce){.dsdel-toast{animation:none}.dsdel-field{transition:none}}',
       '.dsdel-check{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.5));background:transparent;flex:none;margin-right:8px;box-sizing:border-box;cursor:pointer}',
       '.dsdel-check-on{background:var(--dsw-alias-state-business-primary,#4c6ef5);border-color:var(--dsw-alias-state-business-primary,#4c6ef5)}',
       '.dsdel-check-on::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translateY(-1px)}',
@@ -709,10 +782,32 @@ window.__ModuleLoader__.load({
       '.dsdel-drop-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dsdel-bar-count{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary,inherit)}',
       '.dsdel-bar-btn{flex:0 0 auto;white-space:nowrap;appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.4));background:var(--dsw-alias-fill-elevated,rgba(128,128,128,.08));color:var(--dsw-alias-label-primary,inherit);border-radius:8px;font-size:13px;cursor:pointer}',
+      '.dsdel-bar-btn:focus-visible{outline:2px solid var(--dsdel-ring);outline-offset:1px}',
       '.dsdel-bar-btn:disabled{opacity:.5;cursor:default}',
       '.dsdel-bar-danger{border-color:var(--dsw-alias-state-error-primary,#e5484d);background:var(--dsw-alias-state-error-primary,#e5484d);color:#fff}',
+      // One token layer for every surface this plugin draws. Everything below
+      // reads these rather than repeating a fallback per rule: the host theme then
+      // reaches the whole plugin through one block, which is the point of exposing
+      // tokens at all.
+      '.dsdel-page,.dsdel-modal,.dsdel-bar{--dsdel-bg:var(--dsw-alias-fill-elevated,rgba(127,127,127,.06));--dsdel-bg-hover:var(--dsw-alias-fill-hover,rgba(127,127,127,.10));--dsdel-border:var(--dsw-alias-border-l2,rgba(127,127,127,.28));--dsdel-label:var(--dsw-alias-label-primary,inherit);--dsdel-label-dim:var(--dsw-alias-label-secondary,#666);--dsdel-label-faint:var(--dsw-alias-label-tertiary,#888);--dsdel-danger:var(--dsw-alias-state-error-primary,#e5484d);--dsdel-radius:10px;--dsdel-radius-sm:8px;--dsdel-ring:color-mix(in srgb,var(--dsw-alias-brand-primary,#4c8dff) 45%,transparent);--dsdel-shadow:0 1px 2px rgba(0,0,0,.04)}',
       '.dsdel-page{display:flex;flex-direction:column;gap:8px}',
-      '.dsdel-page-hint{margin:0;color:var(--dsw-alias-label-tertiary,#888);font-size:13px;line-height:20px}',
+      // Each switch and its explanation read as one block, so a card with eight
+      // controls stops looking like one long column of tick boxes.
+      '.dsdel-field{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border:1px solid var(--dsdel-border);border-radius:var(--dsdel-radius);background:var(--dsdel-bg);box-shadow:var(--dsdel-shadow);transition:background .12s ease,border-color .12s ease}',
+      '.dsdel-field:hover{background:var(--dsdel-bg-hover)}',
+      '.dsdel-field:focus-within{outline:2px solid var(--dsdel-ring);outline-offset:1px}',
+      '.dsdel-page-hint{margin:0;color:var(--dsdel-label-faint);font-size:12.5px;line-height:19px;letter-spacing:.01em}',
+      // One produced file per row: tick on the left, path in the middle, a folder
+      // button on the right. The button sits outside the label so a click opens
+      // the folder instead of toggling the tick.
+      '.dsdel-file-row{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:var(--dsdel-radius-sm);transition:background .12s ease}',
+      '.dsdel-file-row:hover{background:var(--dsdel-bg-hover)}',
+      '.dsdel-file-label{display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer}',
+      '.dsdel-file-path{flex:1;min-width:0;word-break:break-all;font-size:13px;line-height:20px;color:var(--dsdel-label)}',
+      '.dsdel-file-open{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:26px;height:26px;padding:0;border:1px solid transparent;border-radius:var(--dsdel-radius-sm);background:transparent;color:var(--dsdel-label-dim);cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}',
+      '.dsdel-file-open:hover{background:var(--dsdel-bg);border-color:var(--dsdel-border);color:var(--dsdel-label)}',
+      '.dsdel-file-open:focus-visible{outline:2px solid var(--dsdel-ring);outline-offset:1px}',
+      '.dsdel-file-remove:hover{background:color-mix(in srgb,var(--dsdel-danger) 12%,transparent);border-color:color-mix(in srgb,var(--dsdel-danger) 40%,transparent);color:var(--dsdel-danger)}',
       '.dsdel-star{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-tertiary,#8b93a1);padding:2px 2px 0;}',
       '.dsdel-star-link{color:var(--dsw-alias-brand-primary,#4d76e6);text-decoration:underline;}',
       '.dsdel-root-input{flex:1 1 220px;min-width:160px;min-height:30px;padding:0 10px;border:1px solid var(--dsw-alias-border-secondary,#d0d0d0);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px}',
@@ -720,8 +815,11 @@ window.__ModuleLoader__.load({
       // A wider confirmation dialog: the class reaches it when `Modal` forwards
       // `className`, and the `:has()` rule catches the host-owned container when
       // it does not. Both are harmless if the other one is the one that applies.
-      '.dsdel-dialog-wide{width:min(94vw,980px)!important;max-width:min(94vw,980px)!important}',
-      '[role="dialog"]:has(.dsdel-modal-meta),[aria-modal="true"]:has(.dsdel-modal-meta){width:min(94vw,980px);max-width:min(94vw,980px)}',
+      '.dsdel-dialog-wide{width:min(46vw,860px)!important;max-width:min(46vw,860px)!important;min-height:min(240px,88vh)!important;max-height:88vh!important;display:flex;flex-direction:column;overflow:hidden}',
+      '.dsdel-dialog-wide > :first-child{flex:1 1 auto;min-height:0;overflow:auto}',
+      '.dsdel-dialog-wide > :last-child{flex:0 0 auto;margin-top:auto}',
+      '.dsdel-artifacts{overflow:auto;overscroll-behavior:contain;padding-right:2px}',
+      '[role="dialog"]:has(.dsdel-file-row),[aria-modal="true"]:has(.dsdel-file-row){width:min(46vw,860px);max-width:min(46vw,860px);min-height:min(240px,88vh);max-height:88vh}',
       '.dsdel-picker-list{display:flex;flex-direction:column;gap:2px;max-height:280px;overflow:auto;margin:0 0 8px}',
       '.dsdel-picker-row{appearance:none;text-align:left;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;cursor:pointer}',
       '.dsdel-picker-row:hover{background:var(--dsw-alias-fill-secondary,rgba(127,127,127,0.12))}',
@@ -1528,6 +1626,8 @@ window.__ModuleLoader__.load({
 
     /** Inline glyphs for the two rows; the host exposes no matching pair. */
     const TRASH_PATHS = ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13', 'M9 7V4h6v3']
+    /** A folder, for "show this file where it lives". */
+    const FOLDER_PATHS = ['M3 6a1 1 0 0 1 1-1h4l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z']
     const SELECT_PATHS = ['M5 7m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M5 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M11 7h9', 'M11 17h9']
 
     function glyph(paths) {
@@ -1661,21 +1761,55 @@ window.__ModuleLoader__.load({
         elements.push(h('p', { key: 'selected', className: 'dsdel-modal-meta' },
           translate('artifactSelected', artifacts.selected.size)))
         for (const row of rows.slice(0, ARTIFACT_ROWS_SHOWN)) {
-          elements.push(h('label', {
+          elements.push(h('div', {
             key: `row:${row.path}`,
-            className: 'dsdel-modal-text',
-            style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', cursor: 'pointer' },
+            'data-file-row': row.path,
+            className: 'dsdel-file-row',
           },
-            h('input', {
-              type: 'checkbox',
-              checked: artifacts.selected.has(row.path),
-              onChange: (e) => {
-                if (e && e.target && e.target.checked) artifacts.selected.add(row.path)
-                else artifacts.selected.delete(row.path)
-                publish()
+            h('label', {
+              key: 'label',
+              className: 'dsdel-file-label',
+            },
+              h('input', {
+                type: 'checkbox',
+                checked: artifacts.selected.has(row.path),
+                onChange: (e) => {
+                  if (e && e.target && e.target.checked) artifacts.selected.add(row.path)
+                  else artifacts.selected.delete(row.path)
+                  publish()
+                },
+              }),
+              h('span', { key: 'path', className: 'dsdel-file-path' }, row.displayPath || row.path),
+            ),
+            // Delete just this file. Same destination rule as the conversation
+            // switch: the system trash when recycling is on, gone when it is not.
+            h('button', {
+              key: 'remove',
+              type: 'button',
+              className: 'dsdel-file-open dsdel-file-remove',
+              title: translate('artifactDeleteFile'),
+              'aria-label': translate('artifactDeleteFile'),
+              onClick: (event) => {
+                if (event && typeof event.preventDefault === 'function') event.preventDefault()
+                if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+                deleteOneFile(state.dialog === null ? '' : state.dialog.sessionId, row.path)
               },
-            }),
-            h('span', { style: { wordBreak: 'break-all' } }, row.displayPath || row.path),
+            }, glyph(TRASH_PATHS)),
+            // One folder per row. What moves is the file, so the thing worth
+            // looking at before deciding is where it lives. The button is a
+            // SIBLING of the label: inside it, a click would toggle the tick box.
+            h('button', {
+              key: 'open',
+              type: 'button',
+              className: 'dsdel-file-open',
+              title: translate('artifactOpenFolder'),
+              'aria-label': translate('artifactOpenFolder'),
+              onClick: (event) => {
+                if (event && typeof event.preventDefault === 'function') event.preventDefault()
+                if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+                revealParent(row.path)
+              },
+            }, glyph(FOLDER_PATHS)),
           ))
         }
         if (rows.length > ARTIFACT_ROWS_SHOWN) {
@@ -1691,7 +1825,7 @@ window.__ModuleLoader__.load({
       if (plan.truncated) {
         elements.push(h('p', { key: 'truncated', className: 'dsdel-modal-meta' }, translate('artifactTruncated')))
       }
-      return h('div', { key: 'artifacts' }, elements)
+      return h('div', { key: 'artifacts', className: 'dsdel-artifacts' }, elements)
     }
 
     /** Folder picker overlay: walk directories, then commit one. */
@@ -1775,6 +1909,17 @@ window.__ModuleLoader__.load({
       const dialog = view.dialog
       if (dialog === null) return null
 
+      // The file list sizes its own frame: a short list gets a short dialog, a
+      // long one grows until the viewport cap and then scrolls. A forced ratio
+      // cannot do that — it pins the height, so the empty band under two lines
+      // of text simply moves around.
+      const plan = dialog.artifacts !== null && dialog.artifacts !== undefined
+        ? dialog.artifacts.plan
+        : null
+      const listed = plan === null || plan === undefined
+        ? 0
+        : (plan.created || []).length + (plan.modified || []).length
+      const needsFrame = listed > 0 && dialog.artifacts.auto !== true
       const footer = h(
         Fragment,
         null,
@@ -1795,12 +1940,20 @@ window.__ModuleLoader__.load({
 
       return h(primitives.Modal, {
         open: true,
-        // The produced-file list needs more room than the default dialog gives.
-        // `Modal` does not document a width prop, so the class, the inline style
-        // and the `:has()` rule in the stylesheet all try, and whichever the host
-        // honours wins.
-        className: 'dsdel-dialog-wide',
-        style: { width: 'min(94vw, 980px)', maxWidth: 'min(94vw, 980px)' },
+        // `Modal` documents no width prop, so the class, the inline style and the
+        // `:has()` rule in the stylesheet all try; whichever the host honours wins.
+        // 9:16: the file list reads as a column, so the shell is a phone-shaped
+        // card. Width is derived from the height budget (94vh tall at most), which
+        // keeps the ratio on every window size; the list scrolls inside it.
+        ...(needsFrame ? { className: 'dsdel-dialog-wide' } : {}),
+        ...(needsFrame ? {
+          style: {
+            width: 'min(46vw, 860px)',
+            maxWidth: 'min(46vw, 860px)',
+            minHeight: 'min(240px, 88vh)',
+            maxHeight: '88vh',
+          },
+        } : {}),
         onClose: () => closeDeleteDialog(),
         closeLabel: translate('cancel'),
         title: translate('title'),
@@ -2041,7 +2194,36 @@ window.__ModuleLoader__.load({
           rel: 'noreferrer',
         }, translate('starCta'))))
 
-      return h('div', { className: 'dsdel-page' }, children)
+      // Each control owns the nodes that explain it. Grouping them here keeps the
+      // markup above flat (a switch and its hint are still two pushes) while the
+      // page draws them as one block.
+      const FIELD_KEYS = new Set(['ask', 'recycle', 'syncChildren', 'off', 'auto', 'scope', 'skipGit', 'root'])
+      function groupFields(nodes) {
+        const groups = []
+        let current = null
+        for (const node of nodes) {
+          const key = node !== null && node !== undefined && node.props ? node.props.key : undefined
+          if (FIELD_KEYS.has(key)) {
+            current = { control: key, nodes: [node] }
+            groups.push(current)
+            continue
+          }
+          // The hint of a control is keyed `<control>Hint`; the root row keeps its
+          // input, buttons and hint under the same prefix.
+          if (current !== null && typeof key === 'string' && key !== 'star' && key !== 'cta'
+            && key.startsWith(current.control)) {
+            current.nodes.push(node)
+            continue
+          }
+          current = null
+          groups.push({ control: null, nodes: [node] })
+        }
+        return groups.map((group, index) => (group.control === null
+          ? group.nodes[0]
+          : h('div', { key: `field:${group.control}`, className: 'dsdel-field' }, ...group.nodes)))
+      }
+
+      return h('div', { className: 'dsdel-page' }, groupFields(children))
     }
 
     // --- plugin ------------------------------------------------------------------
@@ -2118,7 +2300,17 @@ window.__ModuleLoader__.load({
           { name: 'shell.overlay', id: `${NS}-picker`, order: 1, locale: NS },
           QuarantinePicker,
         ))
-        // The plugin page card.
+        // The plugin page card, on BOTH seats the manager offers.
+        //
+        // `plugins.bundle.config` renders on the package page, whose address is
+        // `#/panel/plugins/<package>`. `plugins.row.config` renders on the row's
+        // own page, `#/panel/plugins/<package>/<rowId>` — and this bundle's row id
+        // is the package name, so that address repeated itself. The row seat keeps
+        // only its `summary` face, which is the one line the rows list shows.
+        slots.inject('plugins.bundle.config', () => slots.register(
+          { name: 'plugins.bundle.config', key: NS },
+          AskBeforeDeleteOption,
+        ))
         slots.inject('plugins.row.config', () => slots.register(
           { name: 'plugins.row.config', key: `${NS}#${NS}` },
           AskBeforeDeleteOption,

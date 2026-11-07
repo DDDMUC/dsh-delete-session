@@ -333,6 +333,9 @@ async function loadPlugin(options = {}) {
     }
     // The native dialog route. `unsupported` models a platform without one, which
     // is what makes the client fall back to the in-page picker.
+    if (href.endsWith('/dsh-delete-session/delete-file')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, recycled: true }) }
+    }
     if (href.endsWith('/dsh-delete-session/pick')) {
       const pick = options.pick ?? { cancelled: true, path: null }
       if (pick.unsupported === true) {
@@ -1068,14 +1071,16 @@ const artifactSection = (harness) => {
   return kids.find((node) => node && node.props && node.props.key === 'artifacts') ?? null
 }
 
-/** One rendered tick row per listed artifact. */
+/** One rendered row block per listed artifact. */
 const artifactRows = (harness) => {
   const section = artifactSection(harness)
   if (section === null) return []
-  return (section.props.children || []).filter((node) => node && node.type === 'label')
+  return (section.props.children || []).filter((node) => node && node.props && node.props['data-file-row'] !== undefined)
 }
 
-const artifactInputs = (harness) => artifactRows(harness).map((label) => label.props.children[0])
+/** The tick box of one row lives inside that row's label. */
+const rowLabel = (row) => (row.props.children || []).find((child) => child && child.type === 'label')
+const artifactInputs = (harness) => artifactRows(harness).map((row) => rowLabel(row).props.children[0])
 
 /** Open the dialog through the real menu row and let the scan settle. */
 async function openArtifactDialog(harness, session = SESSION_A) {
@@ -2502,4 +2507,285 @@ test('a fresh install deletes the children without listing them', async () => {
     ['session-child-one', 'session-child-two'],
     'and the delete carries them',
   )
+})
+// --- visual layer: tokens, grouped fields, theme-true toast ----------------
+
+test('the page card groups each switch with its hint in one field block', async () => {
+  const harness = await loadPlugin()
+  const card = pageCard(harness)
+  const fields = (card.props.children ?? []).filter(
+    (node) => node && node.props && node.props.className === 'dsdel-field',
+  )
+
+  // Four switches at minimum: ask / recycle / syncChildren / artifacts-off.
+  assert.ok(fields.length >= 4, 'each control became its own block, saw ' + fields.length)
+  for (const field of fields) {
+    const inner = (field.props.children ?? []).filter(Boolean)
+    assert.ok(inner.length >= 1, 'the block holds the control')
+  }
+})
+
+test('the shared tokens are declared once and used by the blocks', async () => {
+  const harness = await loadPlugin()
+  const style = harness.document.head.querySelector('[data-dsh-delete-session="1"]')
+  const css = String(style._text ?? '')
+
+  assert.match(css, /--dsdel-bg:/, 'a background token')
+  assert.match(css, /--dsdel-border:/, 'a border token')
+  assert.match(css, /--dsdel-ring:/, 'a focus ring token')
+  assert.match(css, /\.dsdel-field\{[^}]*border-radius/, 'the block is rounded')
+  assert.match(css, /\.dsdel-field:focus-within\{[^}]*outline/, 'and shows a focus ring')
+})
+
+test('the toast follows the theme instead of the OS colour keywords', async () => {
+  const harness = await loadPlugin()
+  const style = harness.document.head.querySelector('[data-dsh-delete-session="1"]')
+  const css = String(style._text ?? '')
+
+  // `Canvas`/`CanvasText` ignore the DSH theme entirely: in a dark app the toast
+  // stayed a light system rectangle.
+  assert.doesNotMatch(css, /background:Canvas/, 'no system background')
+  assert.doesNotMatch(css, /color:CanvasText/, 'no system text colour')
+  assert.match(css, /\.dsdel-toast\{[^}]*var\(--dsw-alias/, 'it reads the host theme tokens')
+})
+test('the card is registered on the package page, so its URL has one segment', async () => {
+  const harness = await loadPlugin()
+  const bundleEntry = harness.slotRegistrations.find(
+    (entry) => entry.spec.name === 'plugins.bundle.config',
+  )
+
+  // `plugins.row.config` renders on the row page, whose URL is
+  // `#/panel/plugins/<package>/<rowId>` — with the row id equal to the package
+  // name here, the address doubled. `plugins.bundle.config` renders on the
+  // package page itself: `#/panel/plugins/<package>`.
+  assert.ok(bundleEntry, 'the bundle-level slot is registered')
+  assert.equal(bundleEntry.spec.key, NS, 'keyed by the package name')
+
+  const rendered = bundleEntry.Component({ view: 'page' })
+  const fields = (rendered.props.children ?? []).filter(
+    (node) => node && node.props && node.props.className === 'dsdel-field',
+  )
+  assert.ok(fields.length >= 4, 'and it carries the same switches')
+})
+
+test('the row page keeps its one-line summary', async () => {
+  const harness = await loadPlugin()
+  const rowEntry = harness.slotRegistrations.find(
+    (entry) => entry.spec.name === 'plugins.row.config',
+  )
+  assert.ok(rowEntry, 'the row summary is still registered')
+
+  const summary = rowEntry.Component({ view: 'summary' })
+  assert.equal(typeof summary, 'string', 'the row list gets a sentence, not a card')
+})
+// --- each produced file can be opened where it lives ------------------------
+
+/** The row block for one produced file inside the dialog. */
+function fileRow(harness, path) {
+  const modal = dialogElement(harness)
+  if (modal === null) return null
+  const stack = [modal]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || node === undefined || typeof node !== 'object') continue
+    if (node.props && node.props['data-file-row'] === path) return node
+    const kids = node.props && node.props.children
+    if (Array.isArray(kids)) stack.push(...kids)
+    else if (kids) stack.push(kids)
+  }
+  return null
+}
+
+test('every produced file offers a button that opens its folder', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const target = PLAN.created[0].path
+  const row = fileRow(harness, target)
+  assert.ok(row, 'the file has its own row block')
+
+
+  const button = findByKey(row.props.children ?? [], 'open')[0]
+  assert.ok(button, 'the row carries an open button')
+
+  const before = harness.requests.filter((request) => request.url.endsWith('/dsh-delete-session/reveal')).length
+  button.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  await tick()
+  await tick()
+
+  const reveals = harness.requests.filter((request) => request.url.endsWith('/dsh-delete-session/reveal'))
+  assert.equal(reveals.length, before + 1, 'the host is asked to reveal a folder')
+  // The folder, not the file: the OS file manager highlights a file in its parent.
+  assert.equal(JSON.parse(reveals.at(-1).init.body).path, 'C:/ws', 'the parent directory is passed')
+})
+
+test('the open button does not disturb the selection', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const target = PLAN.created[0].path
+  const checkbox = rowLabel(fileRow(harness, target)).props.children[0]
+  assert.equal(checkbox.props.checked, true, 'ticked by default')
+
+  const button = findByKey(fileRow(harness, target).props.children ?? [], 'open')[0]
+  button.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  await tick()
+
+  const after = rowLabel(fileRow(harness, target)).props.children[0]
+  assert.equal(after.props.checked, true, 'still ticked: opening a folder is not a toggle')
+})
+// --- the per-file delete button follows the recycle switch -----------------
+
+const removeButton = (harness, target) =>
+  findByKey(fileRow(harness, target).props.children ?? [], 'remove')[0]
+
+const deleteFileCalls = (harness) =>
+  harness.requests.filter((request) => request.url.endsWith('/dsh-delete-session/delete-file'))
+
+test('deleting one file honours the recycle switch', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const target = PLAN.created[0].path
+  removeButton(harness, target).props.onClick({ preventDefault() {}, stopPropagation() {} })
+  await tick()
+  await tick()
+
+  const calls = deleteFileCalls(harness)
+  assert.equal(calls.length, 1, 'one request')
+  const body = JSON.parse(calls[0].init.body)
+  assert.equal(body.path, target)
+  assert.equal(body.recycle, true, 'recycling is on by default, same as a conversation')
+})
+
+test('with recycling off the file is deleted outright', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(RECYCLE_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const target = PLAN.created[0].path
+  removeButton(harness, target).props.onClick({ preventDefault() {}, stopPropagation() {} })
+  await tick()
+  await tick()
+
+  const body = JSON.parse(deleteFileCalls(harness)[0].init.body)
+  assert.equal(body.recycle, false, 'the switch decides, not the button')
+})
+
+test('a deleted file leaves the list and the selection', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const target = PLAN.created[0].path
+  assert.ok(fileRow(harness, target), 'the row starts out there')
+
+  removeButton(harness, target).props.onClick({ preventDefault() {}, stopPropagation() {} })
+  await tick()
+  await tick()
+
+  assert.equal(fileRow(harness, target), null, 'the row is gone')
+  assert.equal(artifactRows(harness).length, 1, 'the other file stays')
+})
+// --- only the file list earns the wide dialog ------------------------------
+
+test('a plain confirmation keeps the host compact size', async () => {
+  // No produced files here: the everyday "delete this conversation?" box. A
+  // forced ratio would make it a screen-sized empty rectangle, because a
+  // percentage of a wide monitor is simply a wide box.
+  const harness = await loadPlugin()
+  mountRow(harness, SESSION_A)
+  const { element } = deleteRow(harness, SESSION_A)
+  element.props.onSelect({ shiftKey: false })
+  await flush()
+
+  const modal = dialogElement(harness)
+  assert.ok(modal, 'the dialog opened')
+  assert.equal(modal.props.className, undefined, 'no frame class')
+  assert.equal(modal.props.style, undefined, 'and no forced size')
+})
+
+test('the dialog widens when it actually lists files', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const modal = dialogElement(harness)
+  assert.equal(modal.props.className, 'dsdel-dialog-wide', 'the list needs the room')
+})
+
+test('the stylesheet keys the wide rule on the file rows, not on any meta line', async () => {
+  const harness = await loadPlugin()
+  const style = harness.document.head.querySelector('[data-dsh-delete-session="1"]')
+  const css = String(style._text ?? '')
+
+  // `:has(.dsdel-modal-meta)` matched every dialog this plugin draws — the meta
+  // line is just "title · id" — and widened all of them.
+  assert.doesNotMatch(css, /:has\(\.dsdel-modal-meta\)/, 'no widening on a meta line')
+  assert.match(css, /:has\(\.dsdel-file-row\)/, 'the file rows are what earns the width')
+})
+
+test('the dialog is a 16:9 landscape card', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const modal = dialogElement(harness)
+  const style = modal.props.style
+  assert.match(String(style.width), /46vw/, 'the width budget is a share of the viewport')
+  assert.match(String(style.width), /860px/, 'and it has a pixel ceiling for large monitors')
+  assert.equal(style.maxHeight, '88vh', 'and never runs past the viewport')
+
+  // The list is the only part that grows, so it is the part that scrolls.
+  const section = artifactSection(harness)
+  assert.equal(section.props.className, 'dsdel-artifacts', 'the column is a scroll container')
+})
+
+test('the stylesheet carries the same 16:9 geometry', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  assert.match(css, /\.dsdel-dialog-wide\{[^}]*max-width/, 'the class rule bounds the width')
+  assert.match(css, /\.dsdel-artifacts\{[^}]*overflow:auto/, 'the column scrolls')
+})
+
+test('the fixed-height frame keeps its buttons at the bottom', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  // The host renders the dialog as a flex column of [content, footer]. Keying on
+  // OUR class plus first/last child survives a host restyle, which the hashed
+  // module class names (`_content_14mp3_63`) would not.
+  assert.match(css, /\.dsdel-dialog-wide\{[^}]*display:flex/, 'the frame is a flex column')
+  assert.match(css, /\.dsdel-dialog-wide\{[^}]*flex-direction:column/, 'with the host\'s own direction')
+  assert.match(css, /\.dsdel-dialog-wide > :first-child\{[^}]*flex:1/, 'the content takes the slack')
+  assert.match(css, /\.dsdel-dialog-wide > :first-child\{[^}]*overflow:auto/, 'and scrolls instead of growing')
+  assert.match(css, /\.dsdel-dialog-wide > :last-child\{[^}]*margin-top:auto/, 'the footer is pushed down')
+})
+
+test('the frame sizes itself to the list', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  mountRow(harness, SESSION_A)
+  await openArtifactDialog(harness)
+
+  const style = dialogElement(harness).props.style
+  // A ratio pins the height, which is what produced the empty band in the first
+  // place: the box would keep a screen-ish height no matter how few rows it had.
+  assert.equal(style.aspectRatio, undefined, 'no forced ratio')
+  assert.equal(style.height, undefined, 'and no forced height')
+    assert.equal(style.height, undefined, 'the height follows the list, not a ratio')
+  assert.equal(style.maxHeight, '88vh', 'capped by the viewport')
+  assert.match(String(style.minHeight), /240px/, 'and it never collapses')
 })

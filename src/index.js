@@ -858,6 +858,13 @@ async function retireSessionFiles(sessionId, recycle) {
 
 const QUARANTINE_PREFIX = 'purge-quarantine'
 const MAX_LISTED = 500
+/**
+ * How many distinct paths one scan will resolve. Every path costs a realpath,
+ * and a session that walked a large tree can name tens of thousands of them;
+ * the dialog would sit on "scanning" for as long as they take. Past this the
+ * plan reports `truncated`, which the dialog already surfaces.
+ */
+const MAX_SCANNED = 2000
 /** How many path resolutions run at once: enough to hide the threadpool round trip, few enough to stay polite. */
 const RESOLVE_CONCURRENCY = 16
 /** How many directories the folder picker lists before saying there are more. */
@@ -1004,11 +1011,17 @@ async function collectSessionPaths(events, cwd, cache) {
   // names the same handful of files thousands of times, so awaiting per call
   // would buy one threadpool round trip per mention; this buys one per file.
   const named = new Set()
+  let overflow = false
   for (const event of events) {
     const data = event && event.data
     if (!data || typeof data !== 'object' || event.type !== 'tool/call') continue
     const target = toolTarget(typeof data.name === 'string' ? data.name : '', data.arguments, cwd)
-    if (target !== undefined) named.add(target.path)
+    if (target === undefined) continue
+    if (named.size >= MAX_SCANNED && !named.has(target.path)) {
+      overflow = true
+      break
+    }
+    named.add(target.path)
   }
   await runWithConcurrency([...named], RESOLVE_CONCURRENCY, async (absolute) => {
     await identityKey(absolute, memo)
@@ -1063,7 +1076,7 @@ async function collectSessionPaths(events, cwd, cache) {
     else read.add(call.identity)
   }
 
-  return { created, modified }
+  return { named: named.size, overflow, created, modified }
 }
 
 /**
@@ -1207,7 +1220,8 @@ async function planArtifacts(ctx, sessionId, cache, options) {
   }
   const { events, warning } = await readSessionEvents(ctx, sessionId)
   if (warning !== undefined) warnings.push(warning)
-  const { created, modified } = await collectSessionPaths(events, cwd, cache)
+  const scan = await collectSessionPaths(events, cwd, cache)
+  const { created, modified } = scan
   const createdPlan = await classifyPaths(created, cwd, home, options)
   const modifiedPlan = await classifyPaths(modified, cwd, home, options)
   const refused = [...createdPlan.refused, ...modifiedPlan.refused]
@@ -1219,7 +1233,8 @@ async function planArtifacts(ctx, sessionId, cache, options) {
     created: createdPlan.allowed.slice(0, MAX_LISTED),
     modified: modifiedPlan.allowed.slice(0, MAX_LISTED),
     refused: refused.slice(0, MAX_LISTED),
-    truncated: createdPlan.allowed.length > MAX_LISTED
+    truncated: scan.overflow
+      || createdPlan.allowed.length > MAX_LISTED
       || modifiedPlan.allowed.length > MAX_LISTED
       || refused.length > MAX_LISTED,
     warnings,
@@ -1350,6 +1365,72 @@ async function quarantineFiles(targets, cwd, home) {
     }
   }
   return { directory, moved, failed }
+}
+
+/**
+ * The files one plan actually offered. The per-file delete button sends back a
+ * path from this list, and the route refuses anything else: a request cannot
+ * name a file the user was never shown.
+ *
+ * @param plan - the artifact plan this plugin produced for a session.
+ * @returns every listed path, created and modified alike.
+ */
+function artifactCandidates(plan) {
+  const out = []
+  for (const group of [plan.created, plan.modified]) {
+    if (!Array.isArray(group)) continue
+    for (const row of group) {
+      if (row !== null && row !== undefined && typeof row.path === 'string') out.push(row.path)
+    }
+  }
+  return out
+}
+
+/**
+ * The path a per-file delete may touch: one the plan listed, nothing else.
+ * Without this the button would be a general-purpose delete primitive reachable
+ * from the page.
+ *
+ * @param plan - the artifact plan for the session.
+ * @param target - the path the page asked for.
+ * @returns the resolved path, ready to unlink.
+ */
+function assertListedPath(plan, target) {
+  const resolved = path.resolve(target)
+  const listed = artifactCandidates(plan).some((candidate) => path.resolve(candidate) === resolved)
+  if (!listed) throw new HttpError(403, 'not-listed', '该文件不在本对话的产出清单里')
+  return resolved
+}
+
+/**
+ * Delete one produced file. The destination is the user's call, and the dialog
+ * passes the same preference that governs a conversation delete: to the system
+ * trash, or outright.
+ *
+ * @param target - absolute path of the file.
+ * @param recycle - true to send it to the system recycle bin.
+ * @returns `{ recycled }` describing where it went.
+ */
+async function removeOneFile(target, recycle) {
+  const resolved = path.resolve(target)
+  let info
+  try {
+    info = await fsp.lstat(resolved)
+  } catch (error) {
+    throw new HttpError(404, 'missing', `文件已不存在：${String((error && error.message) || error)}`)
+  }
+  if (!info.isFile()) throw new HttpError(400, 'not-a-file', '只能删除普通文件')
+  if (recycle === true) {
+    const ok = await sendToRecycleBin([resolved])
+    if (!ok) throw new HttpError(500, 'recycle', '移入回收站失败')
+    return { recycled: true }
+  }
+  try {
+    await fsp.unlink(resolved)
+  } catch (error) {
+    throw new HttpError(500, 'unlink', `删除失败：${String((error && error.message) || error)}`)
+  }
+  return { recycled: false }
 }
 
 /**
@@ -1752,6 +1833,43 @@ export function apply(ctx) {
       },
     }))
 
+    // Delete ONE produced file from the dialog. The path must be one the scan
+    // listed, so this cannot become a general-purpose delete primitive.
+    fiber.effect(() => webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/delete-file`,
+      handler: async (req, res) => {
+        if (!guard(req, res)) return
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, code: 'method', error: 'POST only' })
+          return
+        }
+        let body = {}
+        try {
+          const raw = await readBody(req)
+          if (raw) body = JSON.parse(raw)
+        } catch {
+          sendJson(res, 400, { ok: false, code: 'invalid', error: 'malformed JSON body' })
+          return
+        }
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        const target = typeof body.path === 'string' ? body.path.trim() : ''
+        try {
+          if (sessionId === '') throw new HttpError(400, 'invalid', 'sessionId required')
+          if (target === '') throw new HttpError(400, 'invalid', 'path required')
+          if (!SESSION_ID_RE.test(sessionId)) throw new HttpError(400, 'invalid', 'invalid session id')
+          const plan = await planArtifacts(ctx, sessionId, undefined, {})
+          const resolved = assertListedPath(plan, target)
+          const result = await removeOneFile(resolved, body.recycle === true)
+          sendJson(res, 200, { ok: true, ...result })
+        } catch (error) {
+          const status = error instanceof HttpError ? error.status : 500
+          const code = error instanceof HttpError ? error.code : 'internal'
+          sendJson(res, status, { ok: false, code, error: String((error && error.message) || error) })
+        }
+      },
+    }))
+
     // The real Windows folder dialog, raised on the user's behalf. Browsers cannot
     // hand a page a filesystem path, but this process is local, so it can.
     fiber.effect(() => webServer.register({
@@ -2007,9 +2125,13 @@ export function apply(ctx) {
 // else in the host reads this face.
 export const internals = {
   pickFolder,
+  artifactCandidates,
+  assertListedPath,
+  removeOneFile,
   claimQuarantineDirectory,
   classifyPaths,
   collectSessionPaths,
+  MAX_SCANNED,
   findSessionCaches,
   freeDestination,
   identityKey,

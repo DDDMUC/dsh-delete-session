@@ -1310,3 +1310,146 @@ test('the native chooser is given a live abort signal', async () => {
   assert.equal(typeof seen.aborted, 'boolean', 'and it is an AbortSignal')
   assert.equal(seen.aborted, false, 'not already aborted')
 })
+
+// --- both subagent creation modes are deletable, and only they -------------
+
+/**
+ * A subagent started in "fork" mode: it inherits a seeded prefix of the parent
+ * log, so the header carries `isSeeded: true` — but `origin` is still `subagent`,
+ * and the host writes it for both creation modes
+ * (`childSessionMeta` in dsh-subagent sets `origin: "subagent"` unconditionally,
+ * with `isSeeded` recording which mode was used).
+ */
+const forkedSubagent = (id, parentSession) => ({
+  id,
+  parentSession,
+  origin: 'subagent',
+  isSeeded: true,
+  delegationDepth: 1,
+})
+
+test('a subagent started by fork is still a child of its parent', () => {
+  const headers = [
+    header('session-parent'),
+    child('session-child-new', 'session-parent'),
+    forkedSubagent('session-child-fork', 'session-parent'),
+  ]
+
+  const found = internals.collectDescendants(headers, 'session-parent')
+
+  assert.deepEqual(
+    found.map((h) => h.id),
+    ['session-child-new', 'session-child-fork'],
+    'both creation modes are picked up',
+  )
+})
+
+test('a forked subagent can be deleted on its own', () => {
+  const headers = [header('session-parent'), forkedSubagent('session-child-fork', 'session-parent')]
+
+  const picked = internals.selectChildDeletes(headers, 'session-parent', ['session-child-fork'])
+
+  assert.deepEqual(picked, ['session-child-fork'], 'deleting the parent may take the fork-mode child')
+})
+
+test('the two modes are told apart from a user fork, which stays untouched', () => {
+  const headers = [
+    header('session-parent'),
+    child('session-child-new', 'session-parent'),
+    forkedSubagent('session-child-fork', 'session-parent'),
+    fork('session-user-fork', 'session-parent'),
+  ]
+
+  const found = internals.collectDescendants(headers, 'session-parent').map((h) => h.id)
+
+  assert.deepEqual(found, ['session-child-new', 'session-child-fork'], 'subagents only')
+  assert.equal(found.includes('session-user-fork'), false, 'a conversation the user branched is not dragged along')
+})
+// --- deleting one produced file, with the same recycle choice ----------------
+
+test('only the files the dialog listed may be deleted one by one', () => {
+  const plan = {
+    created: [{ path: 'C:/ws/new-a.md', ops: 1 }],
+    modified: [{ path: 'C:/ws/old-c.md', ops: 2 }],
+  }
+
+  const candidates = internals.artifactCandidates(plan)
+
+  assert.deepEqual(candidates.sort(), ['C:/ws/new-a.md', 'C:/ws/old-c.md'])
+  // A path the plan never offered is refused by the route; this is the list it
+  // checks against, so it has to cover both groups.
+  assert.equal(candidates.includes('C:/ws/secret.md'), false)
+})
+
+test('a permanent single-file delete really removes the file', async () => {
+  const file = path.join(os.tmpdir(), `dsdel-one-${Date.now()}.md`)
+  fs.writeFileSync(file, 'x')
+
+  const result = await internals.removeOneFile(file, false)
+
+  assert.equal(result.recycled, false)
+  assert.equal(fs.existsSync(file), false, 'gone')
+})
+
+test('a missing file is reported instead of throwing raw', async () => {
+  const file = path.join(os.tmpdir(), `dsdel-one-missing-${Date.now()}.md`)
+
+  await assert.rejects(
+    () => internals.removeOneFile(file, false),
+    (error) => error instanceof Error,
+  )
+})
+
+test('a directory is refused: this button deletes files, not folders', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsdel-one-dir-'))
+  try {
+    await assert.rejects(
+      () => internals.removeOneFile(dir, false),
+      (error) => error && error.code === 'not-a-file',
+    )
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a path the plan never listed is refused', () => {
+  const plan = { created: [{ path: 'C:/ws/listed.md' }], modified: [] }
+
+  assert.equal(internals.assertListedPath(plan, 'C:/ws/listed.md'), path.resolve('C:/ws/listed.md'))
+  assert.throws(
+    () => internals.assertListedPath(plan, 'C:/ws/secret.md'),
+    (error) => error && error.code === 'not-listed',
+  )
+})
+test('a session that names thousands of files is scanned up to a limit, not forever', async () => {
+  // Every distinct path the log names costs a realpath. A runaway session (an
+  // agent that walked a large tree) can name tens of thousands, and the dialog
+  // would sit on "正在扫描…" while all of them are resolved. The cap bounds that
+  // work; the plan reports `truncated`, which the dialog already shows.
+  const events = []
+  for (let i = 0; i < internals.MAX_SCANNED + 50; i += 1) {
+    events.push({
+      type: 'tool/call',
+      data: {
+        name: 'write',
+        arguments: JSON.stringify({ path: `C:/ws/file-${i}.md` }),
+      },
+    })
+  }
+
+  const result = await internals.collectSessionPaths(events, 'C:/ws', new Map())
+
+  assert.equal(result.overflow, true, 'the scan says it stopped early')
+  assert.equal(result.named <= internals.MAX_SCANNED, true, 'and resolved no more than the cap')
+})
+
+test('a small session is not flagged as truncated', async () => {
+  const events = [
+    { type: 'tool/call', data: { name: 'write', arguments: JSON.stringify({ path: 'C:/ws/a.md' }) } },
+    { type: 'tool/call', data: { name: 'write', arguments: JSON.stringify({ path: 'C:/ws/b.md' }) } },
+  ]
+
+  const result = await internals.collectSessionPaths(events, 'C:/ws', new Map())
+
+  assert.equal(result.overflow, false)
+})
