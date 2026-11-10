@@ -50,7 +50,12 @@ process.env.DSH_HOME = HOME_ROOT
 // hand the next test the real home.
 beforeEach(() => {
   assert.equal(process.env.DSH_HOME, HOME_ROOT, 'every test must run against the scratch home')
-  assert.ok(HOME_ROOT.startsWith(os.tmpdir()), 'the scratch home must live under tmp, got ' + HOME_ROOT)
+  // Compare through realpath: on macOS `os.tmpdir()` is /var/folders/... while
+  // the same directory resolves to /private/var/folders/..., and a plain prefix
+  // test failed every single test in this file on this machine.
+  const tmp = fs.realpathSync(os.tmpdir())
+  const root = fs.realpathSync(HOME_ROOT)
+  assert.ok(root.startsWith(tmp), 'the scratch home must live under tmp, got ' + HOME_ROOT)
 })
 
 function writeAt(root, relative, content = 'x') {
@@ -1165,10 +1170,24 @@ test('the delete reports which children failed', async () => {
 
   const result = await internals.deleteSession(serviceFree, PARENT_ID, {
     recycle: false,
-    childSessionIds: ['not-a-session-id'],
+    // Not "not-a-session-id": a dashed name is a LEGAL DSH id (the GUI creates
+    // named sessions). What must never become a child delete is an id that
+    // could leave the session store.
+    childSessionIds: ['../etc/passwd'],
   })
 
-  assert.equal(result.children.length, 0, 'an invalid id never becomes a child delete')
+  assert.equal(result.children.length, 0, 'an id that could leave a path never becomes a child delete')
+})
+
+test('a NAMED session is taken with its parent, like any other id', async () => {
+  const parent = plantSession(PARENT_ID)
+  const named = plantSession('bili-whale')
+
+  await internals.deleteSession(serviceFree, PARENT_ID, { recycle: false, childSessionIds: ['bili-whale'] })
+
+  assert.equal(fs.existsSync(parent.dir), false, 'the parent is gone')
+  assert.equal(fs.existsSync(named.dir), false, 'the named child went with it')
+  assert.equal(fs.existsSync(named.cache), false, 'and so did its cache row')
 })
 
 test('a child is probed for a live writer before its files go', async () => {

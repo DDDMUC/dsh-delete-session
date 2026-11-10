@@ -36,7 +36,16 @@ const realpathNative = promisify(fs.realpath.native)
 export const name = 'dsh-delete-session'
 
 const ROUTE_PREFIX = '/dsh-delete-session'
-const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// A session id is an OPAQUE string to DSH: the host's own schema is
+// `z.string().min(1)`, and a named session created in the GUI (`bili-whale`,
+// stored as ~/.dsh/storages/<profile>/sessions/bili-whale.json) is exactly as
+// real as a UUID one. A UUID-only test rejected those with a 400 - the panel
+// then answered "状态加载失败" for a session that plainly exists, and a session
+// list filtered by it hid them. The character class still refuses everything
+// that could leave a path or a URL: `/`, `\`, `..` (the first character must be
+// alphanumeric, so a leading dot is already out), whitespace and control
+// characters.
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const MAX_BATCH = 100
 
 class HttpError extends Error {
