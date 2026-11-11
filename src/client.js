@@ -776,6 +776,16 @@ window.__ModuleLoader__.load({
       // exclusion rule silently hid the bar together with its Cancel button.
       'body.dsdel-selecting [data-slot="sidebar.footer.action"] > [data-dsh-plugin]{display:none}',
       'body.dsdel-selecting [data-slot="sidebar.footer.action"] > [class*="_entryRow"]{display:none}',
+      // A third shape: entries with no wrapper at all. The slot outlet is
+      // `display:contents` and the component is its direct child, so a bare
+      // <button> registration (dsh-sidebar-declutter's 收起面板列表) carries
+      // neither `data-dsh-plugin` nor an `_entryRow`, and the two rules above
+      // missed it. `> button` reaches exactly that shape.
+      //
+      // The `:not([role="toolbar"])` guard is not decoration: this plugin's own
+      // bar announces itself with role="toolbar", so an unguarded `> button`
+      // would hide the bar itself if its root ever became a <button>.
+      'body.dsdel-selecting [data-slot="sidebar.footer.action"] > button:not([role="toolbar"]){display:none}',
       '.dsdel-drop{border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.4));border-radius:8px;color:var(--dsw-alias-label-secondary,inherit)}',
       '.dsdel-drop-over{border-color:var(--dsw-alias-state-error-primary,#e5484d);border-style:solid;background:rgba(229,72,77,.10);color:var(--dsw-alias-state-error-primary,#e5484d)}',
       '.dsdel-drop-icon{display:inline-flex;flex:0 0 auto;align-items:center}',

@@ -2789,3 +2789,30 @@ test('the frame sizes itself to the list', async () => {
   assert.equal(style.maxHeight, '88vh', 'capped by the viewport')
   assert.match(String(style.minHeight), /240px/, 'and it never collapses')
 })
+
+test('a button-shaped footer entry steps aside without hiding the bar itself', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  // `dsh-sidebar-declutter` registers 收起面板列表 as a bare <button> in this slot,
+  // with neither `data-dsh-plugin` nor an `_entryRow` wrapper, so the two attribute
+  // rules above never matched it and it overlapped the bar.
+  //
+  // The slot has no wrapper layer: the renderer's outlet is
+  // `<div data-slot style="display:contents">` and the component is its direct
+  // child, which is what makes `> button` precise here.
+  assert.equal(
+    css.includes('body.dsdel-selecting [data-slot="sidebar.footer.action"] > button:not([role="toolbar"]){display:none}'),
+    true,
+    'button-shaped entries step aside',
+  )
+
+  // Without the `:not([role="toolbar"])` guard, any footer entry whose root is a
+  // <button> would hide itself — including this plugin's own bar, which would take
+  // the Cancel button with it.
+  assert.doesNotMatch(
+    css,
+    /\[data-slot="sidebar\.footer\.action"\] > button\{display:none\}/,
+    'never hide every button unconditionally',
+  )
+})

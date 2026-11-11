@@ -162,6 +162,10 @@ MIT
 
 ## 修复记录
 
+**（v0.2.7）** —— 多选时按钮型页脚入口也让位。
+
+- **`dsh-sidebar-declutter` 的「收起面板列表」不再压住底栏**：它的入口是裸 `<button>` 挂在 `sidebar.footer.action` 上，既没有 `data-dsh-plugin`，也没有 `_entryRow` 包装，原来的两条让位规则都命中不了它，于是它和底栏挤在同一行。新增 `> button:not([role="toolbar"])` 覆盖这种形状。
+- 那条 `:not([role="toolbar"])` 不是装饰：底栏自己的根节点就是 `role="toolbar"`，去掉它的话，万一底栏根节点变成 `<button>`，多选时会把底栏连同取消按钮一起藏掉。
 **（v0.2.6）** —— 会话 id 校验放宽 + 空会话按空状态处理。
 
 - **会话 id 不再只认 UUID**：命名会话（例如 `bili-whale`，`~/.dsh/storages/<profile>/sessions/bili-whale.json`）是完全合法的会话，但这里的校验只接受 UUID 形式，于是对它的每个请求都被 400 拒掉 —— 面板上就是「状态加载失败，稍后重试。」。现在按 DSH 自己的语法（宿主侧 schema 就是 `z.string().min(1)`）放宽为 `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`，仍然挡住 `/`、`\`、`..`、空白与控制字符。
