@@ -1472,3 +1472,102 @@ test('a small session is not flagged as truncated', async () => {
 
   assert.equal(result.overflow, false)
 })
+
+// --- delete speed: backoff schedule and phase pipeline ---------------------
+
+test('the lease probe backs off exponentially instead of waiting 200ms flat', () => {
+  const schedule = []
+  for (let attempt = 1; attempt <= internals.BUSY_RETRY_ATTEMPTS; attempt += 1) {
+    schedule.push(internals.busyBackoff(attempt))
+  }
+
+  // A live session's first probe is almost always busy (detach releases the lease
+  // asynchronously), so the first retry is what the user actually feels.
+  assert.equal(schedule[0], 20, 'first retry after 20ms, not 200ms')
+  assert.equal(schedule[1], 40)
+  assert.equal(schedule[2], 80)
+  assert.equal(schedule[3], 160)
+  assert.equal(schedule[4], 200, 'capped at the old flat delay')
+
+  // The ceiling must not grow: total wait stays no worse than the flat version.
+  const total = schedule.reduce((a, b) => a + b, 0)
+  const flat = (internals.BUSY_RETRY_ATTEMPTS - 1) * 200
+  assert.equal(total <= flat, true, 'total ' + total + 'ms vs flat ' + flat + 'ms')
+})
+
+test('a batch stops every session before it probes any lease', async () => {
+  // Phase pipeline: stop-and-flush all → probe all → retire all. The point is that
+  // the 20-40ms lease waits of different sessions overlap instead of queueing
+  // behind the bounded retire workers.
+  const stoppedAtProbe = []
+  // A session id has two accepted spellings, so `flush` runs twice per session.
+  // The property under test is "every session was stopped", not "every call".
+  const stoppedIds = new Set()
+  const ctx = {
+    get(name) {
+      if (name === 'sessionPersistence') {
+        return {
+          open: async (sessionId) => {
+            stoppedAtProbe.push({ sessionId, stopCount: stoppedIds.size })
+            return { close: async () => {} }
+          },
+        }
+      }
+      if (name === 'sessions') {
+        return {
+          get: (variant) => ({ id: variant }),
+          flush: async (live) => {
+            stoppedIds.add(String(live.id).replace(/^session-/, ''))
+          },
+          store: { get: () => undefined },
+        }
+      }
+      return undefined
+    },
+  }
+
+  const ids = []
+  for (let i = 0; i < 4; i += 1) {
+    const id = `session-0000000${i}-0000-4000-8000-0000000000${i}0`
+    ids.push(id)
+    plantSession(id)
+  }
+
+  const results = await internals.deleteSessions(ctx, ids, { recycle: false })
+
+  assert.equal(results.length, 4, 'one result per session')
+  assert.deepEqual(results.map((r) => r.ok), [true, true, true, true], 'all deleted')
+
+  // Every probe must see that all four sessions were already stopped. The old
+  // per-session pipeline probed the first session while the others were still
+  // flushing, so this is the property that proves the phases were batched.
+  for (const entry of stoppedAtProbe) {
+    assert.equal(entry.stopCount, ids.length, 'session ' + entry.sessionId + ' probed after every stop')
+  }
+})
+
+test('one failing session does not take the rest of the batch down', async () => {
+  const good = 'session-00000001-0000-4000-8000-000000000010'
+  const bad = 'session-00000002-0000-4000-8000-000000000020'
+  plantSession(good)
+
+  const ctx = {
+    get(name) {
+      if (name !== 'sessionPersistence') return undefined
+      return {
+        open: async (sessionId) => {
+          if (sessionId === bad) throw new Error('held by an active writer forever')
+          return { close: async () => {} }
+        },
+        stat: async () => undefined,
+      }
+    },
+  }
+
+  const results = await internals.deleteSessions(ctx, [good, bad], { recycle: false })
+
+  const byId = new Map(results.map((r) => [r.sessionId, r]))
+  assert.equal(byId.get(good).ok, true, 'the healthy session still goes')
+  assert.equal(byId.get(bad).ok, false, 'the stuck one reports failure')
+  assert.equal(byId.get(bad).code, 'busy')
+})

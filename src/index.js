@@ -638,10 +638,25 @@ async function flushAndDetach(ctx, sessionId) {
 // lease asynchronously (session/disposed starts a persistence retirement), so
 // the probe is retried with a short backoff before the request is refused -
 // in practice the first click then succeeds without forcing anything.
-// The backoff is short (200ms x 12 = ~2.2s worst case) so a batch containing
-// live sessions stays responsive while the lease retirement lands.
+// A live session is the common case: detaching releases the write lease through
+// an asynchronous retirement, so the FIRST probe almost always finds it busy.
+// A flat 200ms delay therefore charged every live delete ~200ms before it even
+// started. The wait is now exponential — 20, 40, 80, 160, then the old 200ms —
+// which lands the typical case in ~20-40ms and keeps the ceiling unchanged
+// (total wait is shorter than 12 x 200ms, never longer).
 const BUSY_RETRY_ATTEMPTS = 12
-const BUSY_RETRY_DELAY_MS = 200
+const BUSY_RETRY_BASE_MS = 20
+const BUSY_RETRY_MAX_MS = 200
+
+/**
+ * How long to wait before retry `attempt` (1-based).
+ * @param attempt - the retry about to happen.
+ * @returns milliseconds to sleep.
+ */
+function busyBackoff(attempt) {
+  const step = BUSY_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1)
+  return Math.min(step, BUSY_RETRY_MAX_MS)
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -670,7 +685,7 @@ async function assertNoActiveWriter(ctx, sessionId) {
       }
     }
     if (!busy) return true
-    if (attempt < BUSY_RETRY_ATTEMPTS) await sleep(BUSY_RETRY_DELAY_MS)
+    if (attempt < BUSY_RETRY_ATTEMPTS) await sleep(busyBackoff(attempt))
   }
   throw new HttpError(409, 'busy', 'session is currently open in DSH')
 }
@@ -686,6 +701,10 @@ async function assertNoActiveWriter(ctx, sessionId) {
 // 8), so 6 keeps a ~33% gain over 4 while staying below the saturation knee
 // and limiting the number of simultaneous lease-probe loops.
 const BATCH_CONCURRENCY = 6
+// The lease probe is a few milliseconds of waiting, not I/O: it can run wider
+// than the file sweep without adding load, and that width is the whole point of
+// phase 2 of the batch pipeline.
+const BATCH_PROBE_CONCURRENCY = 16
 
 let workspaceLock = Promise.resolve()
 function withWorkspaceLock(fn) {
@@ -752,29 +771,39 @@ async function detachFromWorkspace(ctx, sessionId) {
 
 // --- core delete -------------------------------------------------------------
 
-async function deleteSession(ctx, sessionId, options) {
-  if (!SESSION_ID_RE.test(sessionId)) {
-    throw new HttpError(400, 'invalid', 'invalid session id')
-  }
-  // Undoable by default: only an explicit `recycle: false` sends the files to a
-  // plain removal instead of the system trash.
+/**
+ * Phase 1 - stop everything that writes to a session and flush its log.
+ * Cheap and independent per session, so a batch runs these together.
+ */
+async function stopSession(ctx, sessionId) {
+  await quiesceAgent(ctx, sessionId)
+  return flushAndDetach(ctx, sessionId)
+}
+
+/** Phase 2 - wait for the write lease. The waits of different sessions overlap. */
+async function requireWritable(ctx, sessionId) {
+  await assertNoActiveWriter(ctx, sessionId)
+}
+
+/**
+ * Phase 3 - retire the files, verify, drop the workspace accounting, then take
+ * the ticked child sessions with it.
+ *
+ * Children stay sequential and last: one failure never takes the parent result
+ * down with it, because the parent is what the user clicked.
+ *
+ * @returns `{ removed, caches, workspaceDetached, children }`.
+ */
+async function retireSession(ctx, sessionId, options, stopResult) {
   const recycle = options === undefined || options === null || options.recycle !== false
-  // Subagent sessions are sessions of their own; the ones the caller ticked are
-  // taken with their parent. Anything that is not a well-formed id is dropped
-  // here, before it reaches the filesystem.
   const childSessionIds = options !== undefined && options !== null && Array.isArray(options.childSessionIds)
     ? options.childSessionIds
       .filter((id) => typeof id === 'string' && SESSION_ID_RE.test(id))
       .filter((id) => bareSessionId(id) !== bareSessionId(sessionId))
     : []
-  const stopped = await quiesceAgent(ctx, sessionId)
-  const { flushed, detached } = await flushAndDetach(ctx, sessionId)
-  await assertNoActiveWriter(ctx, sessionId)
+  const flushed = stopResult !== undefined && stopResult !== null && stopResult.flushed === true
+  const detached = stopResult !== undefined && stopResult !== null && stopResult.detached === true
 
-  // Retire the on-disk directories first, then the cache rows. With the Recycle
-  // Bin switch on (the default) they are staged and the shell moves them to the
-  // bin in the background; switched off, they are removed outright — that is what
-  // the dialog promises in that state.
   const { removed, caches } = await retireSessionFiles(sessionId, recycle)
 
   const sp = ctx.get('sessionPersistence')
@@ -794,8 +823,6 @@ async function deleteSession(ctx, sessionId, options) {
     throw new HttpError(404, 'not-found', 'session not found')
   }
 
-  // Children last, and one failure never takes the parent result down with it:
-  // the parent is what the user clicked, so that click has to land.
   const children = []
   for (const childId of childSessionIds) {
     try {
@@ -823,17 +850,105 @@ async function deleteSession(ctx, sessionId, options) {
     }
   }
 
+  return { removed, caches, workspaceDetached, children }
+}
+
+/**
+ * Delete one session: the three phases in order. Kept as the single-session
+ * entry point, and expressed in the same phase helpers the batch uses so the two
+ * can never drift apart.
+ */
+async function deleteSession(ctx, sessionId, options) {
+  if (!SESSION_ID_RE.test(sessionId)) {
+    throw new HttpError(400, 'invalid', 'invalid session id')
+  }
+  const stopResult = await stopSession(ctx, sessionId)
+  await requireWritable(ctx, sessionId)
+  const result = await retireSession(ctx, sessionId, options, stopResult)
   return {
-    removed,
-    caches,
-    stopped,
-    flushed,
-    detached,
-    workspaceDetached,
-    children,
+    removed: result.removed,
+    caches: result.caches,
+    stopped: stopResult !== undefined && stopResult.flushed !== undefined,
+    flushed: stopResult.flushed,
+    detached: stopResult.detached,
+    workspaceDetached: result.workspaceDetached,
+    children: result.children,
   }
 }
 
+/**
+ * Delete many sessions as three overlapping phases:
+ *
+ *   1. stop and flush every session (bounded, but the work is tiny)
+ *   2. probe every write lease (wide: these are the 20-40ms waits, and they only
+ *      overlap if nothing queues behind the retire workers)
+ *   3. retire files, verify, detach accounting, take children (bounded)
+ *
+ * The old shape ran all three phases inside each session, six at a time, so a
+ * batch of live sessions paid its lease waits in waves. One failing session never
+ * takes the batch down: it comes back as `{ ok: false }`.
+ *
+ * @returns one `{ sessionId, ok, removed }` (or `{ ok: false, code, error }`) per id.
+ */
+async function deleteSessions(ctx, sessionIds, options) {
+  const valid = []
+  const rejected = []
+  for (const sessionId of sessionIds) {
+    if (SESSION_ID_RE.test(sessionId)) valid.push(sessionId)
+    else rejected.push({ sessionId, ok: false, code: 'invalid', error: 'invalid session id' })
+  }
+
+  // Phase 1: stop + flush. A failure here is that session's failure only.
+  const stopped = new Map()
+  const stopErrors = new Map()
+  await runWithConcurrency(valid, BATCH_CONCURRENCY, async (sessionId) => {
+    try {
+      stopped.set(sessionId, await stopSession(ctx, sessionId))
+    } catch (error) {
+      stopErrors.set(sessionId, error)
+    }
+  })
+
+  // Phase 2: lease probe, wide. Sessions that never stopped are not probed.
+  const unready = new Map()
+  const ready = valid.filter((sessionId) => !stopErrors.has(sessionId))
+  await runWithConcurrency(ready, BATCH_PROBE_CONCURRENCY, async (sessionId) => {
+    try {
+      await requireWritable(ctx, sessionId)
+    } catch (error) {
+      unready.set(sessionId, error)
+    }
+  })
+
+  // Phase 3: retire what is clear to go.
+  const results = []
+  const swept = valid.filter((sessionId) => !stopErrors.has(sessionId) && !unready.has(sessionId))
+  const retired = new Map()
+  const retireErrors = new Map()
+  await runWithConcurrency(swept, BATCH_CONCURRENCY, async (sessionId) => {
+    try {
+      retired.set(sessionId, await retireSession(ctx, sessionId, options, stopped.get(sessionId)))
+    } catch (error) {
+      retireErrors.set(sessionId, error)
+    }
+  })
+
+  for (const sessionId of valid) {
+    const error = stopErrors.get(sessionId) || unready.get(sessionId) || retireErrors.get(sessionId)
+    if (error !== undefined) {
+      results.push({
+        sessionId,
+        ok: false,
+        code: error instanceof HttpError ? error.code : 'internal',
+        error: String((error && error.message) || error),
+      })
+      continue
+    }
+    results.push({ sessionId, ok: true, removed: retired.get(sessionId).removed })
+  }
+
+  return [...results, ...rejected]
+}
 /**
  * Take one session off the disk: its directories and its cache rows, then any
  * directory the drain recreated. Shared by the parent and every child, so a
@@ -2097,21 +2212,9 @@ export function apply(ctx) {
         // sessions run in parallel and the workspace accounting mutation is
         // serialized inside deleteSession, so a batch can never interleave two
         // deletions of the same storage.
-        const results = await runWithConcurrency(sessionIds, BATCH_CONCURRENCY, async (sessionId) => {
-          try {
-            const result = await deleteSession(ctx, sessionId, {
-              recycle: body.recycle !== false,
-              childSessionIds: Array.isArray(body.childSessionIds) ? body.childSessionIds : [],
-            })
-            return { sessionId, ok: true, removed: result.removed }
-          } catch (error) {
-            return {
-              sessionId,
-              ok: false,
-              code: error instanceof HttpError ? error.code : 'internal',
-              error: String((error && error.message) || error),
-            }
-          }
+        const results = await deleteSessions(ctx, sessionIds, {
+          recycle: body.recycle !== false,
+          childSessionIds: Array.isArray(body.childSessionIds) ? body.childSessionIds : [],
         })
         const deleted = results.filter((item) => item.ok).length
         sendJson(res, 200, { ok: true, results, deleted, failed: results.length - deleted })
@@ -2152,6 +2255,9 @@ export const internals = {
   resolveQuarantineRoot,
   removeForever,
   deleteSession,
+  deleteSessions,
+  busyBackoff,
+  BUSY_RETRY_ATTEMPTS,
   retirePaths,
   retireTargets,
   listSessionHeaders,
