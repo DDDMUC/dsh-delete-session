@@ -1203,7 +1203,7 @@ window.__ModuleLoader__.load({
         },
           h('span', { key: 'icon', className: 'dsdel-drop-icon' }, glyph(TRASH_PATHS)),
           h('span', { key: 'text', className: 'dsdel-drop-text' },
-            armed ? translate('dropRelease', name) : translate('dropHint', name)),
+            armed ? translate('dropRelease', { name }) : translate('dropHint')),
         )
       }
       // Outside selection mode the footer keeps its normal face.

@@ -2851,3 +2851,36 @@ test('a button-shaped footer entry steps aside without hiding the bar itself', a
     'never hide every button unconditionally',
   )
 })
+
+test('the drop label names the conversation instead of printing the placeholder', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+
+  startRowDrag(harness, row)
+  await flush()
+  bar(harness).props.onDragOver(dropEvent())
+  await flush()
+
+  const node = bar(harness)
+  const text = JSON.stringify(node.props.children)
+
+  // The dictionary entry is `松手删除「{name}」`, but the interpolation map carries
+  // `n`/`done`/`total`/`ok`/`fail`/`path` — not `name`. Passing the title as a bare
+  // string therefore left the braces in the label.
+  assert.doesNotMatch(text, /\{name\}/, 'no unsubstituted placeholder in the label')
+  assert.match(text, /松手删除/, 'the sentence is still there')
+})
+
+test('the drop label carries the dragged conversation title', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+  row.textContent = 'BiliLearn-AI 仓库'
+
+  startRowDrag(harness, row)
+  await flush()
+  bar(harness).props.onDragOver(dropEvent())
+  await flush()
+
+  const text = JSON.stringify(bar(harness).props.children)
+  assert.match(text, /BiliLearn-AI 仓库/, 'the title reaches the sentence')
+})
