@@ -238,6 +238,109 @@ window.__ModuleLoader__.load({
       doneQuarantineFailed: (ok, fail) => `Session deleted, ${ok} quarantined and ${fail} failed`,
     }
 
+    const ru = {
+      menu: 'Удалить сессию',
+      multiSelect: 'Выбрать несколько',
+      title: 'Удалить сессию',
+      descRecycle: 'Сессия и все её записи (журнал, учёт рабочей папки и статистика) будут убраны из списка и перемещены в системную корзину.',
+      descPermanent: 'Сессия и все её записи (журнал, учёт рабочей папки и статистика) будут удалены безвозвратно. Отменить это нельзя.',
+      cancel: 'Отмена',
+      confirm: 'Удалить',
+      deleting: 'Удаление…',
+      done: 'Сессия удалена',
+      failed: 'Не удалось удалить: ',
+      busy: 'Сессия сейчас открыта в DSH, удаление не завершилось. Повторите через момент (обычно пара секунд) или перезапустите DSH и попробуйте снова.',
+      notFound: 'Сессия не найдена (возможно, она уже удалена).',
+      untitled: 'Сессия без названия',
+      cancelSelect: 'Отмена',
+      selectedCount: (n) => `Выбрано: ${n}`,
+      batchRunning: (done, total) => `Удаление ${done}/${total}…`,
+      moveSelected: 'Переместить',
+      batchMoving: (done, total) => `Перемещение ${done}/${total}…`,
+      batchMoved: (ok, fail) => (fail > 0 ? `Перемещено ${ok}, не удалось ${fail}` : `Перемещено ${ok}`),
+      moveBadResult: (fields) => `В ответе о перемещении нет полей: ${fields}`,
+      deleteSelected: 'Удалить',
+      batchDone: (n) => `Удалено сессий: ${n}`,
+      batchPartial: (ok, fail) => `Удалено ${ok}, не удалось ${fail}`,
+      batchFailed: 'Массовое удаление не удалось: ',
+      pageAsk: 'Спрашивать перед удалением',
+      pageRecycle: 'Удалять в корзину',
+      pageSyncChildren: 'Удалять и дочерние сессии',
+      dropHint: 'Перетащите сюда, чтобы удалить',
+      dropRelease: 'Отпустите, чтобы удалить «{name}»',
+      dropFallback: 'этот диалог',
+      starAsk: '⭐ Звёздочка на GitHub сделает автору день',
+      starCta: 'Ладно, держи звезду',
+      pageSyncChildrenOn: 'Удаление сессии удаляет и порождённые ею сессии субагентов.',
+      pageSyncChildrenOff: 'Если выключено, перед удалением появится список дочерних сессий и вы отметите, какие удалить.',
+      childrenHint: 'У этого диалога {n} дочерних сессий (субагентов). Отмеченные удалятся вместе с ним.',
+      pageRecycleOn: 'Сессия попадёт в системную корзину, её можно восстановить.',
+      pageRecycleOff: 'Сессия сразу удаляется с диска, восстановить её нельзя.',
+      pageHintAsk: 'Перед каждым удалением сессии показывать подтверждение.',
+      pageHintAuto: 'Удалять сессию сразу, не спрашивая.',
+      // The produced-file list only exists inside the dialog, so ask mode keeps a
+      // delete dialog even when the confirmation above is turned off.
+      pageHintAutoWithArtifacts: 'Диалог всё равно откроется: сначала нужно показать список созданных файлов.',
+      pageSummaryAsk: 'Спрашивать перед удалением',
+      pageSummaryAuto: 'Удалять не спрашивая',
+      pageArtifactsOff: 'Не трогать созданные файлы (как сейчас)',
+      pageHintArtifactsOff: 'Удаление сессии убирает только её записи и не касается файлов в рабочей папке.',
+      pageHintArtifactsOn: 'При удалении сессии разбираются и файлы, которые она трогала в рабочей папке.',
+      pageArtifactsAuto: 'Сразу отправлять созданные файлы в карантин',
+      pageHintArtifactsAuto: 'Все файлы из области ниже переносятся в карантин без вопросов.',
+      pageHintArtifactsAsk: 'При удалении появится список файлов, и вы отметите, какие переносить.',
+      pageScopeCreated: 'Только созданные файлы',
+      pageScopeAll: 'Созданные и изменённые файлы',
+      pageScopeCreatedHint: 'Затрагиваются только файлы, созданные этим диалогом; изменённые им существующие файлы не трогаются.',
+      pageScopeAllHint: 'Сюда входят и существующие файлы, которые этот диалог переписал: их перенос изменит то, что уже было в рабочей папке.',
+      pageSkipGit: 'Пропускать файлы внутри git-репозитория',
+      pageSkipGitOn: 'Обрабатываются только файлы вне git-репозиториев; код из репозитория не переносится.',
+      pageSkipGitOff: 'Файлы из репозитория тоже уйдут в карантин: удалив диалог, поработавший в проекте, можно унести и исходники.',
+      pageSummaryArtifactsOff: 'Созданные файлы не трогаются',
+      pageSummaryArtifactsAuto: 'Созданные файлы — в карантин',
+      pageSummaryArtifactsAsk: 'Созданные файлы — спросить',
+      pageRootLabel: 'Где хранить карантин',
+      pageRootPlaceholder: 'Пусто — путь по умолчанию',
+      pageRootBrowse: 'Выбрать папку…',
+      pageRootOpen: 'Открыть',
+      rootOpened: 'Открыто в файловом менеджере',
+      rootOpenFailed: 'Не удалось открыть: ',
+      pickerOpening: 'Системный диалог открыт — выберите папку в его окне',
+      pickerFailed: 'Не удалось открыть выбор папки: ',
+      pageRootReset: 'По умолчанию',
+      pageRootDefaultHint: (path) => `Используется путь по умолчанию: ${path}`,
+      pageRootCustomHint: 'Карантин создаётся здесь: по подпапке с отметкой времени на каждое удаление',
+      pickerTitle: 'Куда переносить файлы в карантин',
+      pickerLoading: 'Чтение…',
+      pickerEmpty: 'Здесь нет подпапок',
+      pickerChoose: 'Выбрать эту папку',
+      pickerTruncated: 'Подпапок слишком много: показаны первые 500',
+      pickerDefault: (path) => `Путь по умолчанию: ${path}`,
+      rootSet: 'Место сохранения обновлено',
+      artifactSection: 'Файлы, созданные этим диалогом',
+      artifactOpenFolder: 'Открыть папку',
+      artifactDeleteFile: 'Удалить этот файл',
+      fileDeleted: 'Файл удалён',
+      fileRecycled: 'Файл перемещён в корзину',
+      fileDeleteFailed: 'Не удалось удалить файл: ',
+      revealFailed: 'Не удалось открыть папку: ',
+      artifactLoading: 'Сканирование…',
+      artifactFailed: 'Сканирование не удалось: ',
+      artifactNone: 'Нечего обрабатывать.',
+      artifactCount: (created, modified) => `Создано: ${created} · изменено: ${modified}`,
+      artifactAutoNote: (n) => `После удаления в карантин уйдёт файлов: ${n}`,
+      artifactAutoOnly: 'Созданные файлы уходят в карантин автоматически, здесь они не перечисляются.',
+      artifactRefused: (n) => `Пропущено ещё: ${n}`,
+      artifactSelected: (n) => `Выбрано: ${n}`,
+      artifactMore: (n) => `Не показано ещё: ${n}`,
+      artifactTruncated: 'Список сокращён: всё, что не показано, останется нетронутым.',
+      artifactScopeCreated: 'Область: только созданные',
+      artifactScopeAll: 'Область: созданные + изменённые',
+      artifactModifiedWarn: 'Изменённые существующие файлы (по умолчанию не отмечены):',
+      doneQuarantine: (n) => `Сессия удалена, файлов в карантине: ${n}`,
+      doneQuarantineFailed: (ok, fail) => `Сессия удалена, в карантине ${ok}, не удалось ${fail}`,
+    }
+
     let sessionsSvc = null
     let localeSvc = null
 
@@ -245,9 +348,17 @@ window.__ModuleLoader__.load({
       if (typeof navigator === 'undefined') return 'zh'
       for (const tag of (navigator.languages || []).concat([navigator.language])) {
         const primary = String(tag || '').toLowerCase().split('-')[0]
-        if (primary === 'zh' || primary === 'en') return primary
+        if (primary === 'zh' || primary === 'en' || primary === 'ru') return primary
       }
       return 'zh'
+    }
+
+    const dictionaries = { zh, en, ru }
+
+    // The dictionary the built-in lookup reads: the browser's language when it is
+    // one we ship, the historical zh fallback otherwise.
+    function activeDictionary() {
+      return dictionaries[browserLang()] || zh
     }
 
     // The DOM decoration layer (row checkboxes, batch bar, toast) is not a slot
@@ -255,6 +366,13 @@ window.__ModuleLoader__.load({
     // honours the registered `locale` namespace when the host provides one.
     // Slot components receive the host-injected `t` and use that instead.
     function t(key, a, b) {
+      // A Russian browser reads the plugin's own dictionary first: DSH ships no
+      // ru locale, so the host translator would answer in Chinese or English and
+      // the Russian strings registered below would never be seen.
+      if (browserLang() === 'ru') {
+        const own = activeDictionary()[key]
+        if (own !== undefined) return typeof own === 'function' ? own(a, b) : own
+      }
       if (localeSvc && typeof localeSvc.translate === 'function') {
         try {
           const text = localeSvc.translate(NS, key)
@@ -263,7 +381,7 @@ window.__ModuleLoader__.load({
           // fall back to the built-in dictionaries
         }
       }
-      const value = (browserLang() === 'en' ? en : zh)[key]
+      const value = activeDictionary()[key]
       return typeof value === 'function' ? value(a, b) : value || key
     }
 
@@ -288,8 +406,8 @@ window.__ModuleLoader__.load({
         // and all. Calling it without params is no better: the host (and this
         // module's own `t`) invoke function entries with no arguments, which
         // produces "已选 undefined 个".
-        const dictionary = browserLang() === 'en' ? en : zh
-        const local = dictionary[key]
+        const dict = activeDictionary()
+        const local = dict[key]
         if (local !== undefined) {
           if (typeof local === 'function') return local(a, b)
           if (typeof local === 'string' && local.includes('{') && a !== undefined) {
@@ -308,6 +426,20 @@ window.__ModuleLoader__.load({
       }
       wrapped.__dsdelLocalized = true
       return wrapped
+    }
+
+    /**
+     * Pick the translator the session-menu rows render through.
+     *
+     * The host injects a `t` bound to this namespace and stays the authority for
+     * the languages DSH itself ships (zh, en): following it is what keeps the menu
+     * in step when the UI language is changed in the settings. For a Russian
+     * browser there is nothing to follow - DSH ships no ru locale - so the plugin's
+     * own dictionary answers first and the rows do not drop back to English.
+     */
+    function slotTranslator(injected) {
+      const raw = typeof injected === 'function' ? injected : t
+      return browserLang() === 'ru' ? localizedTranslator(raw) : raw
     }
 
     // --- state -----------------------------------------------------------------
@@ -1666,7 +1798,8 @@ window.__ModuleLoader__.load({
     // contract and must not change how the menu looks.
 
     /** "Select multiple" row (order 409, directly above the delete row). */
-    function SelectMultipleMenuItem({ useMenuOpenState, t: translate }) {
+    function SelectMultipleMenuItem({ useMenuOpenState, t: injected }) {
+      const translate = slotTranslator(injected)
       const [, setMenuOpen] = useMenuOpenState()
       return h(primitives.MenuItemButton, {
         icon: glyph(SELECT_PATHS),
@@ -1679,7 +1812,8 @@ window.__ModuleLoader__.load({
     }
 
     /** "Delete session" row (order 410, in the host's danger colour). */
-    function DeleteSessionMenuItem({ sessionId, displayTitle, useMenuOpenState, t: translate }) {
+    function DeleteSessionMenuItem({ sessionId, displayTitle, useMenuOpenState, t: injected }) {
+      const translate = slotTranslator(injected)
       const [, setMenuOpen] = useMenuOpenState()
       return h(primitives.MenuItemButton, {
         danger: true,
@@ -2271,7 +2405,7 @@ window.__ModuleLoader__.load({
         localeSvc = svc || null
         if (localeRegistered || !localeSvc || typeof localeSvc.register !== 'function') return
         localeRegistered = true
-        const register = () => localeSvc.register(NS, { zh, en })
+        const register = () => localeSvc.register(NS, { zh, en, ru })
         try {
           if (typeof ctx.effect === 'function') ctx.effect(register, `${NS}: dictionaries`)
           else register()

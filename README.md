@@ -30,7 +30,7 @@ DSH 侧边栏的会话菜单只有**重命名 / 分叉 / 归档**——归档只
 - **跳过 git 仓库内的文件（默认开）** —— 在项目里干过活的对话，产出文件里往往就是项目源码。开启后仓库内的文件一律不碰，避免删一个对话把项目搬空
 - **删除后回到新会话** —— 若删除的正是当前打开的会话，自动切到一个全新会话，而不是落到已不可用的邻居页
 - **默认安全** —— 宿主路由仅限本机回环（回环 socket + 回环 Host 头 + 同源校验）；被 DSH 打开占用的会话会被明确拒绝（409），绝不与活跃写者竞争
-- **中英双语** —— 菜单项、对话框与设置页跟随 DSH 界面语言（zh / en）
+- **三种语言** —— 菜单项、对话框与设置页跟随 DSH 界面语言（zh / en）；浏览器语言为 ru 时显示俄语（DSH 本身尚未提供 ru 界面，插件自带字典兜底）
 - **零依赖** —— 不引入任何 DSH SDK，所有服务（`sessions` / `sessionPersistence` / `agents` / `workspaceRegistry` / `webServer`）都在调用时通过 cordis 上下文获取
 
 ### 安装
@@ -197,7 +197,7 @@ This plugin puts **Delete** back where you already click: the session row's `...
 - **Skip files inside git repositories (on by default)** — a conversation that worked in a project produces that project's source. With this on, nothing inside a repository is touched
 - **Lands on a fresh session** — deleting the session you are looking at switches to a new one instead of an unusable neighbour page
 - **Safe by default** — host routes are loopback-only (loopback socket, loopback Host header, same-origin check); a session the host still holds open is refused with 409 rather than raced
-- **Bilingual** — menu rows, dialog and settings follow the DSH UI language (zh / en)
+- **Three languages** — menu rows, dialog and settings follow the DSH UI language (zh / en), and a Russian browser gets Russian from the bundled dictionary even though DSH itself ships no ru locale
 - **Zero dependencies** — no DSH SDK import; `sessions`, `sessionPersistence`, `agents`, `workspaceRegistry` and `webServer` are all resolved from the cordis context at call time
 
 ### Install

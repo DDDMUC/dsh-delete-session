@@ -669,6 +669,41 @@ test('the locale namespace is registered even when the locale service arrives la
   assert.equal(selectRow(harness).element.props.children, '多选')
 })
 
+test('the Russian dictionary ships with every key the other dictionaries carry', async () => {
+  const harness = await loadPlugin()
+  const { ru, zh, en } = harness.locales[NS]
+  assert.ok(ru, 'ru reaches the host locale namespace')
+  assert.equal(ru.menu, 'Удалить сессию')
+  assert.equal(ru.confirm, 'Удалить')
+  // A key missing here would fall back to Chinese mid-dialog, so the key sets
+  // have to match exactly rather than merely overlap.
+  const keys = (dict) => Object.keys(dict).sort()
+  assert.deepEqual(keys(ru), keys(zh), 'ru covers exactly the zh key set')
+  assert.deepEqual(keys(en), keys(zh), 'en still covers the zh key set')
+})
+
+test('a Russian browser gets Russian labels from the built-in dictionary', async () => {
+  const harness = await loadPlugin()
+  const previous = globalThis.navigator
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { language: 'ru-RU', languages: ['ru-RU'] },
+    configurable: true,
+    writable: true,
+  })
+  try {
+    // The host translator in this harness answers in zh; the rows must prefer the
+    // plugin's own Russian dictionary instead of following it.
+    assert.equal(deleteRow(harness).element.props.children, 'Удалить сессию')
+    assert.equal(selectRow(harness).element.props.children, 'Выбрать несколько')
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: previous,
+      configurable: true,
+      writable: true,
+    })
+  }
+})
+
 test('the delete row asks the host for its danger styling', async () => {
   const harness = await loadPlugin()
   const { element } = deleteRow(harness)
