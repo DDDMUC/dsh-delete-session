@@ -233,6 +233,12 @@ let bundleFactory = null
 // next one can drop the leftovers.
 const rafQueues = []
 
+// Timers started by a plugin instance outlive the test that started them. The
+// batch path schedules a 2.5 s settle, and its callback decorates whatever
+// `globalThis.document` is when it fires - the next test's DOM. Track and
+// clear them so one test cannot reach into another.
+const pendingTimers = []
+
 /**
  * The bundle registers through `window.__ModuleLoader__` once per process and ESM
  * caching means a second `import()` never re-runs it. Caching the factory is also
@@ -317,6 +323,13 @@ async function loadPlugin(options = {}) {
   // very regression this file exists to catch.
   // Drop anything an earlier instance queued: it would run against THIS dom.
   for (const stale of rafQueues) stale.clear()
+  while (pendingTimers.length > 0) clearTimeout(pendingTimers.pop())
+  const realSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = (fn, ms) => {
+    const id = realSetTimeout(fn, ms)
+    pendingTimers.push(id)
+    return id
+  }
   let rafId = 0
   const rafQueue = new Map()
   rafQueues.push(rafQueue)
@@ -3578,4 +3591,73 @@ test('a workspace box never reaches into a nested workspace', async () => {
 
   const box = header.querySelector('.dsdel-select-all')
   assert.deepEqual(box.__dsdelIds, [SESSION_A.id], 'only the outer group\'s own session')
+})
+
+test('multi-select delete carries the artifact switch to every request', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '1')
+  localStorage.setItem(SKIP_KEY, '1')
+  const first = mountRow(harness, SESSION_A)
+  const second = mountRow(harness, SESSION_B)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  clickRowIn(harness, second)
+  await flush()
+
+  clickBar(barDelete(harness))
+  // The batch runs several workers and settles asynchronously; waiting only one
+  // tick left them running into the NEXT test, whose harness swapped the document
+  // out from under them. Drain until the bar is gone.
+  await settle()
+  for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
+
+  // The single-delete path sends `quarantine`; batch used to call postDelete(id)
+  // with nothing, so "quarantine the produced files" was silently skipped while
+  // that same switch stayed on. Every request here has to carry it.
+  const bodies = harness.requests
+    .filter((call) => call.url === '/dsh-delete-session/delete')
+    .map((call) => JSON.parse(call.init.body))
+  assert.equal(bodies.length, 2, 'one request per selected session')
+  for (const body of bodies) {
+    assert.deepEqual(body.quarantine, { scope: 'created' }, 'the produced files follow the switch')
+  }
+})
+
+test('multi-select delete leaves the files alone when the switch is off', async () => {
+  const harness = await loadPlugin()
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  clickBar(barDelete(harness))
+  await settle()
+  for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
+
+  const bodies = harness.requests
+    .filter((call) => call.url === '/dsh-delete-session/delete')
+    .map((call) => JSON.parse(call.init.body))
+  assert.equal(bodies.length, 1, 'the delete went out')
+  assert.equal('quarantine' in bodies[0], false, 'and does not move any file')
+})
+
+test('a batch in asking mode says the files were left alone', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '0')
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+
+  clickBar(barDelete(harness))
+  await settle()
+  for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
+
+  // Asking means a per-file checklist, which a batch has nowhere to show. Silence
+  // would look like the files had been handled.
+  const said = toasts(harness).join(' | ')
+  assert.equal(said.includes('产出文件没有处理'), true, 'the user is told: ' + said)
+  assert.equal('quarantine' in deleteBody(harness), false, 'and nothing was moved')
 })

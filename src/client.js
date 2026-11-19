@@ -59,6 +59,9 @@ window.__ModuleLoader__.load({
       deleteSelected: '删除',
       batchDone: (n) => `已删除 ${n} 个会话`,
       batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
+      batchDoneQuarantine: (n, m) => `已删除 ${n} 个会话，${m} 个文件已移入隔离夹`,
+      batchDoneQuarantineFailed: (n, ok, fail) => `已删除 ${n} 个会话，隔离 ${ok} 个、${fail} 个失败`,
+      batchAskArtifacts: '这批会话的产出文件没有处理：批量删除不列逐文件清单。要处理它们，请单个删除，或在插件页改成「产出文件默认全部进隔离夹」。',
       batchFailed: '批量删除失败：',
       pageAsk: '删除时询问',
       pageRecycle: '删除至回收站',
@@ -165,6 +168,9 @@ window.__ModuleLoader__.load({
       deleteSelected: 'Delete',
       batchDone: (n) => `Deleted ${n} session(s)`,
       batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
+      batchDoneQuarantine: (n, m) => `Deleted ${n} session(s), ${m} file(s) moved to quarantine`,
+      batchDoneQuarantineFailed: (n, ok, fail) => `Deleted ${n} session(s), ${ok} quarantined and ${fail} failed`,
+      batchAskArtifacts: 'The produced files of these sessions were left alone: a batch has no per-file checklist. Delete them one by one, or switch the plugin page to "move every produced file to quarantine".',
       batchFailed: 'Batch delete failed: ',
       pageAsk: 'Ask before deleting',
       pageRecycle: 'Delete to the Recycle Bin',
@@ -268,6 +274,9 @@ window.__ModuleLoader__.load({
       deleteSelected: 'Удалить',
       batchDone: (n) => `Удалено сессий: ${n}`,
       batchPartial: (ok, fail) => `Удалено ${ok}, не удалось ${fail}`,
+      batchDoneQuarantine: (n, m) => `Удалено сессий: ${n}, файлов в карантине: ${m}`,
+      batchDoneQuarantineFailed: (n, ok, fail) => `Удалено сессий: ${n}, в карантине ${ok}, не удалось ${fail}`,
+      batchAskArtifacts: 'Файлы этих сессий не обработаны: пакетное удаление не показывает список файлов. Удаляйте по одному или переключите страницу плагина на «все созданные файлы в карантин». ',
       batchFailed: 'Массовое удаление не удалось: ',
       pageAsk: 'Спрашивать перед удалением',
       pageRecycle: 'Удалять в корзину',
@@ -596,6 +605,20 @@ window.__ModuleLoader__.load({
     function subscribePrefs(listener) {
       prefListeners.add(listener)
       return () => { prefListeners.delete(listener) }
+    }
+
+    /**
+     * The `quarantine` payload a delete should carry, or undefined for "do not
+     * touch any file".
+     *
+     * Only `auto` mode can answer this without a dialog: asking means handing the
+     * user a per-file checklist, which a batch of sessions has nowhere to put.
+     * The batch path used to skip this entirely, so a user who had switched the
+     * feature on got a silent no-op instead of a quarantine.
+     */
+    function quarantinePlan() {
+      if (artifactsOff() || !artifactsAuto()) return undefined
+      return { scope: artifactScope() }
     }
 
     /** Whether the produced-files feature is off. Off unless explicitly enabled. */
@@ -1654,6 +1677,15 @@ window.__ModuleLoader__.load({
       for (const id of ids) state.pending.add(id)
       publish()
 
+      // The same switch the single path honours; without this every request went
+      // out with no `quarantine` field and the files stayed where they were.
+      const quarantine = quarantinePlan()
+      // The feature is on but `auto` is off: the user expects files to be handled
+      // and a batch cannot show the per-file checklist. Say so afterwards rather
+      // than pretending the files were dealt with.
+      const askOnly = !artifactsOff() && !artifactsAuto()
+      let movedFiles = 0
+      let failedFiles = 0
       const failedIds = []
       let cursor = 0
       const worker = async () => {
@@ -1663,7 +1695,12 @@ window.__ModuleLoader__.load({
           if (index >= ids.length) return
           const id = ids[index]
           try {
-            await postDelete(id)
+            const result = await postDelete(id, quarantine)
+            const outcome = result && result.quarantine ? result.quarantine : null
+            if (outcome !== null) {
+              movedFiles += outcome.moved.length
+              failedFiles += outcome.failed.length
+            }
             state.batch.done += 1
           } catch {
             state.batch.failed += 1
@@ -1681,12 +1718,22 @@ window.__ModuleLoader__.load({
         const ok = state.batch ? state.batch.done : 0
         state.batch = null
         if (failed === 0) {
-          toast(t('batchDone', ok))
+          // The files are reported with the count, so a user who moved a hundred
+          // of them sees that number instead of a bare "deleted".
+          if (failedFiles > 0) {
+            toast(t('batchDoneQuarantineFailed', ok, movedFiles, failedFiles), true)
+          } else if (movedFiles > 0) {
+            toast(t('batchDoneQuarantine', ok, movedFiles))
+          } else {
+            toast(t('batchDone', ok))
+          }
+          if (askOnly) toast(t('batchAskArtifacts'), true)
           exitSelection({ keepPending: true })
           settlePendingSoon()
         } else {
           for (const id of failedIds) state.selected.add(id)
           toast(t('batchPartial', ok, failed), true)
+          if (askOnly) toast(t('batchAskArtifacts'), true)
           publish()
         }
         refreshList()
@@ -1765,7 +1812,7 @@ window.__ModuleLoader__.load({
       // and the menu row forces the dialog in that case. With the feature off no
       // quarantine field is sent at all, keeping the request identical to the
       // version that predates the feature.
-      const quarantine = !artifactsOff() && artifactsAuto() ? { scope: artifactScope() } : undefined
+      const quarantine = quarantinePlan()
       postDelete(info.sessionId, quarantine)
         .then((result) => {
           const outcome = result && result.quarantine ? result.quarantine : null
