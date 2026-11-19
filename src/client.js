@@ -359,11 +359,52 @@ window.__ModuleLoader__.load({
     let sessionsSvc = null
     let localeSvc = null
 
+    /** Languages this plugin ships dictionaries for. */
+    const SHIPPED = ['zh', 'en', 'ru']
+
+    /**
+     * The language DSH itself is showing, or null when the host offers none.
+     *
+     * `dsh-client-locale` provides a `locale` service: `getSnapshot()` returns
+     * `{ active }` and `subscribe()` fires on every change. It also mirrors the
+     * choice onto `document.documentElement.lang`, which covers the case where the
+     * service is not reachable but the page has already been localised.
+     */
+    function hostLang() {
+      if (localeSvc !== null && typeof localeSvc.getSnapshot === 'function') {
+        try {
+          const snapshot = localeSvc.getSnapshot()
+          const active = snapshot && typeof snapshot.active === 'string' ? snapshot.active : null
+          if (active !== null) return active
+        } catch { /* fall through to the document hint */ }
+      }
+      if (typeof document !== 'undefined' && document.documentElement) {
+        const html = document.documentElement.lang
+        if (typeof html === 'string' && html !== '') return html
+      }
+      return null
+    }
+
+    /**
+     * Which of our dictionaries to read.
+     *
+     * The host is authoritative and the browser is the fallback: following
+     * `navigator.language` alone meant an English OS rendered an English plugin
+     * even with DSH switched to 中文. A host language we do not ship (DSH knows
+     * ja/es/fr/de/pt as well) falls back to Russian for ru, English for the rest,
+     * because the host would also answer in one of those two.
+     */
     function browserLang() {
+      const host = hostLang()
+      if (host !== null) {
+        const primary = String(host).toLowerCase().split('-')[0]
+        if (primary === 'zh' || primary === 'en' || primary === 'ru') return primary
+        return primary === 'ru' ? 'ru' : 'en'
+      }
       if (typeof navigator === 'undefined') return 'zh'
       for (const tag of (navigator.languages || []).concat([navigator.language])) {
         const primary = String(tag || '').toLowerCase().split('-')[0]
-        if (primary === 'zh' || primary === 'en' || primary === 'ru') return primary
+        if (SHIPPED.indexOf(primary) !== -1) return primary
       }
       return 'zh'
     }
@@ -444,17 +485,18 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Pick the translator the session-menu rows render through.
+     * The translator every slot component renders through.
      *
-     * The host injects a `t` bound to this namespace and stays the authority for
-     * the languages DSH itself ships (zh, en): following it is what keeps the menu
-     * in step when the UI language is changed in the settings. For a Russian
-     * browser there is nothing to follow - DSH ships no ru locale - so the plugin's
-     * own dictionary answers first and the rows do not drop back to English.
+     * The plugin ships its own dictionaries and follows the host's language
+     * (issue #3), so its dictionary is asked first for every language it carries,
+     * not just Russian. Deferring to the injected `t` for zh/en would split one
+     * language across two authorities: with DSH set to English the menu would say
+     * "Delete session" while the bar and the dialog stayed Chinese. Keys this
+     * plugin does not ship still go to the host.
      */
     function slotTranslator(injected) {
       const raw = typeof injected === 'function' ? injected : t
-      return browserLang() === 'ru' ? localizedTranslator(raw) : raw
+      return localizedTranslator(raw)
     }
 
     // --- state -----------------------------------------------------------------
@@ -2741,8 +2783,20 @@ window.__ModuleLoader__.load({
       // printing raw keys ("multiSelect", "menu"). `ctx.effect` ties the
       // registration's lifetime to the plugin, matching ui-workspace.
       let localeRegistered = false
+      let localeSubscribed = false
       const adoptLocale = (svc) => {
         localeSvc = svc || null
+        // The bar, the dialog and the toasts are rendered by this plugin, so they
+        // do not inherit the host's re-render when the language changes in the
+        // settings. Piggy-backing on the service's own notification keeps them in
+        // step with the menu rows, which the host and re-render itself.
+        if (localeSvc !== null && typeof localeSvc.subscribe === 'function' && !localeSubscribed) {
+          localeSubscribed = true
+          try {
+            const off = localeSvc.subscribe(() => { try { publish() } catch { /* not mounted yet */ } })
+            if (typeof ctx.effect === 'function' && typeof off === 'function') ctx.effect(() => off, `${NS}: language changes`)
+          } catch { /* a host without subscribe still renders on its own */ }
+        }
         if (localeRegistered || !localeSvc || typeof localeSvc.register !== 'function') return
         localeRegistered = true
         const register = () => localeSvc.register(NS, { zh, en, ru })

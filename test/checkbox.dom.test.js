@@ -257,6 +257,8 @@ async function loadPlugin(options = {}) {
   const document = {
     body: new StubElement('body'),
     head: new StubElement('head'),
+    // Read when the host provides no locale service at all.
+    documentElement: new StubElement('html'),
     createElement: (tag) => new StubElement(tag),
     addEventListener(type, handler) {
       const list = documentListeners.get(type) ?? []
@@ -399,6 +401,11 @@ async function loadPlugin(options = {}) {
   const locales = {}
   const localeStub = {
     register: (namespace, dictionaries) => { locales[namespace] = dictionaries },
+    // `dsh-client-locale` exposes `getSnapshot() -> { active }`. The plugin follows
+    // it instead of `navigator.language`, so an English OS with DSH in Chinese no
+    // longer renders an English plugin (issue #3).
+    getSnapshot: () => ({ active: options.activeLocale ?? 'zh', locales: [], revision: 0 }),
+    subscribe: () => () => {},
     // Mirrors dsh-client-locale: a non-string entry is handed back untouched, and
     // only string templates interpolate `{name}` from a params object. Returning
     // a function as-is is exactly what makes the plugin fall back to its own
@@ -449,11 +456,14 @@ async function loadPlugin(options = {}) {
       if (name === 'slots') return slotsStub
       // `lateLocale` models a host where the locale service is only reachable
       // through ctx.inject, which is the path that used to skip registration.
-      if (name === 'locale') return options.lateLocale ? null : localeStub
+      if (name === 'locale') return (options.lateLocale || options.noLocale) ? null : localeStub
       return null
     },
     inject: (names, cb) => {
-      if (typeof cb === 'function') cb(options.lateLocale ? { slots: slotsStub, locale: localeStub } : { slots: slotsStub })
+      if (typeof cb === 'function') {
+        const late = options.lateLocale && !options.noLocale
+        cb(late ? { slots: slotsStub, locale: localeStub } : { slots: slotsStub })
+      }
     },
     effect: (fn) => { const dispose = fn(); return () => { if (typeof dispose === 'function') dispose() } },
   })
@@ -723,19 +733,20 @@ test('the Russian dictionary ships with every key the other dictionaries carry',
   assert.deepEqual(keys(en), keys(zh), 'en still covers the zh key set')
 })
 
-test('a Russian browser gets Russian labels from the built-in dictionary', async () => {
-  const harness = await loadPlugin()
+test('an English OS with DSH in Chinese renders Chinese (issue #3)', async () => {
+  const harness = await loadPlugin({ activeLocale: 'zh' })
   const previous = globalThis.navigator
   Object.defineProperty(globalThis, 'navigator', {
-    value: { language: 'ru-RU', languages: ['ru-RU'] },
+    value: { language: 'en-US', languages: ['en-US'] },
     configurable: true,
     writable: true,
   })
   try {
-    // The host translator in this harness answers in zh; the rows must prefer the
-    // plugin's own Russian dictionary instead of following it.
-    assert.equal(deleteRow(harness).element.props.children, 'Удалить сессию')
-    assert.equal(selectRow(harness).element.props.children, 'Выбрать несколько')
+    // The reported bug: the OS is English, the user set DSH to 中文, and the plugin
+    // still answered in English because it read `navigator.language`. The host is
+    // the authority now, so the browser language must not win.
+    assert.equal(deleteRow(harness).element.props.children, '删除会话')
+    assert.equal(selectRow(harness).element.props.children, '多选')
   } finally {
     Object.defineProperty(globalThis, 'navigator', {
       value: previous,
@@ -743,6 +754,73 @@ test('a Russian browser gets Russian labels from the built-in dictionary', async
       writable: true,
     })
   }
+})
+
+test('a Chinese OS with DSH in English renders English', async () => {
+  const harness = await loadPlugin({ activeLocale: 'en' })
+  const previous = globalThis.navigator
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { language: 'zh-CN', languages: ['zh-CN'] },
+    configurable: true,
+    writable: true,
+  })
+  try {
+    assert.equal(deleteRow(harness).element.props.children, 'Delete session')
+    assert.equal(selectRow(harness).element.props.children, 'Select multiple')
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: previous,
+      configurable: true,
+      writable: true,
+    })
+  }
+})
+
+test('a host language we do not ship falls back to English', async () => {
+  const harness = await loadPlugin({ activeLocale: 'ja' })
+
+  // DSH knows ja/es/fr/de/pt as well. Those have no dictionary here, and the host
+  // would answer in English for them, so the plugin does too instead of silently
+  // dropping to Chinese (which is what the old browser-based fallback did).
+  assert.equal(deleteRow(harness).element.props.children, 'Delete session')
+})
+
+test('with no locale service the document hint decides', async () => {
+  const harness = await loadPlugin({ lateLocale: true, noLocale: true })
+  harness.document.documentElement.lang = 'ru'
+
+  // `dsh-client-locale` mirrors its choice onto `<html lang>`. A host that never
+  // hands over the service still leaves that behind, so it is read next.
+  assert.equal(deleteRow(harness).element.props.children, 'Удалить сессию')
+})
+
+test('with neither hint the browser language is the last resort', async () => {
+  const harness = await loadPlugin({ noLocale: true })
+  const previous = globalThis.navigator
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { language: 'ru-RU', languages: ['ru-RU'] },
+    configurable: true,
+    writable: true,
+  })
+  try {
+    // Pre-#3 behaviour, kept as the floor: something has to answer when the host
+    // provides nothing at all.
+    assert.equal(deleteRow(harness).element.props.children, 'Удалить сессию')
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: previous,
+      configurable: true,
+      writable: true,
+    })
+  }
+})
+test('a Russian DSH gets Russian labels from the built-in dictionary', async () => {
+  const harness = await loadPlugin({ activeLocale: 'ru' })
+
+  // The host translator in this harness answers in zh; the rows must prefer the
+  // plugin's own Russian dictionary instead of following it.
+  assert.equal(deleteRow(harness).element.props.children, 'Удалить сессию')
+  assert.equal(selectRow(harness).element.props.children, 'Выбрать несколько')
 })
 
 test('the delete row asks the host for its danger styling', async () => {
