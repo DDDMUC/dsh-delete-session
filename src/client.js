@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     const zh = {
       menu: '删除会话',
       multiSelect: '多选',
+      selectAllGroup: '全选这个工作区',
+      selectAllWorkspaces: '全选所有工作区',
       title: '删除会话',
       descRecycle: '将把该会话及其全部对话记录（会话日志、工作区记账与统计）从列表中移除，并放进系统回收站。',
       descPermanent: '将永久删除该会话及其全部对话记录（会话日志、工作区记账与统计），此操作不可恢复。',
@@ -140,6 +142,8 @@ window.__ModuleLoader__.load({
     const en = {
       menu: 'Delete session',
       multiSelect: 'Select multiple',
+      selectAllGroup: 'Select every session in this workspace',
+      selectAllWorkspaces: 'Select every session in every workspace',
       title: 'Delete session',
       descRecycle: 'This removes the session and all of its conversation records (log, workspace accounting and statistics) from the list and puts them in the system trash.',
       descPermanent: 'This permanently deletes the session and all of its conversation records (log, workspace accounting and statistics). This cannot be undone.',
@@ -241,6 +245,8 @@ window.__ModuleLoader__.load({
     const ru = {
       menu: 'Удалить сессию',
       multiSelect: 'Выбрать несколько',
+      selectAllGroup: 'Выбрать все сессии этой рабочей папки',
+      selectAllWorkspaces: 'Выбрать все сессии во всех рабочих папках',
       title: 'Удалить сессию',
       descRecycle: 'Сессия и все её записи (журнал, учёт рабочей папки и статистика) будут убраны из списка и перемещены в системную корзину.',
       descPermanent: 'Сессия и все её записи (журнал, учёт рабочей папки и статистика) будут удалены безвозвратно. Отменить это нельзя.',
@@ -893,6 +899,27 @@ window.__ModuleLoader__.load({
       '@keyframes dsdel-toast-in{from{opacity:0;transform:translate(-50%,6px)}to{opacity:1;transform:translate(-50%,0)}}',
       '@media (prefers-reduced-motion:reduce){.dsdel-toast{animation:none}.dsdel-field{transition:none}}',
       '.dsdel-check{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.5));background:transparent;flex:none;margin-right:8px;box-sizing:border-box;cursor:pointer}',
+      // The two select-all boxes sit where the host puts them: inside each
+      // workspace header row, and inside the `工作区 N` heading above all of them.
+      //
+      // They live in the SIDEBAR, outside the `.dsdel-page` / `.dsdel-modal` /
+      // `.dsdel-bar` token scope, so every rule here reads a host alias with its
+      // own fallback. Reaching for `var(--dsdel-border)` was the bug: an unknown
+      // custom property voids the whole declaration, which left the box with no
+      // border, no content and nothing to click on.
+
+      // The spacer is the only child that grows, so the right-hand cluster keeps
+      // its place at the row's end while the box stays beside the name.
+      '.dsdel-flex-spacer{flex:1 1 auto;min-width:0;align-self:center;height:1px}',
+      '.dsdel-select-all,.dsdel-select-all-workspaces{flex:0 0 auto;box-sizing:border-box;width:15px;height:15px;min-width:15px;margin:0 0 0 6px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.45));border-radius:4px;background:transparent;color:var(--dsw-alias-label-secondary,#666);font-size:10px;line-height:1;cursor:pointer;opacity:1;visibility:visible;align-self:center}',
+      '.dsdel-select-all:hover,.dsdel-select-all-workspaces:hover{border-color:var(--dsw-alias-brand-primary,#4c8dff);color:var(--dsw-alias-brand-primary,#4c8dff)}',
+      '.dsdel-select-all[aria-checked="true"],.dsdel-select-all-workspaces[aria-checked="true"]{background:var(--dsw-alias-brand-primary,#4c8dff);border-color:var(--dsw-alias-brand-primary,#4c8dff);color:#fff}',
+      '.dsdel-select-all[aria-checked="mixed"],.dsdel-select-all-workspaces[aria-checked="mixed"]{border-color:var(--dsw-alias-brand-primary,#4c8dff);color:var(--dsw-alias-brand-primary,#4c8dff)}',
+      '.dsdel-select-all:focus-visible,.dsdel-select-all-workspaces:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4c8dff);outline-offset:1px}',
+      // While the mode runs, let the workspace name size to its own text. With
+      // `flex:1` it fills the row, so the select-all box inserted after it was
+      // pushed to the far edge even though it sits early in the child list.
+      'body.dsdel-selecting [class*="_projectText"]{flex:0 1 auto;min-width:0}',
       '.dsdel-check-on{background:var(--dsw-alias-state-business-primary,#4c6ef5);border-color:var(--dsw-alias-state-business-primary,#4c6ef5)}',
       '.dsdel-check-on::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translateY(-1px)}',
       // 乐观删除：行先隐藏，失败时随 decorate 恢复
@@ -1084,6 +1111,244 @@ window.__ModuleLoader__.load({
       else openDeleteDialog(drag.sessionId, drag.title)
     }
 
+    // --- select a whole workspace ----------------------------------------------
+    //
+    // The sidebar groups sessions under `[data-row-key="workspace:<key>"]` headers,
+    // and the host renders the `工作区 N` heading above all of them as
+    // `[data-sidebar-workspace-header]`. Both get a checkbox of their own while the
+    // mode runs: one per group, one for every group together.
+    //
+    // Group membership is read off the DOM rather than asked from the host: a
+    // session row and its workspace row are siblings inside the same section
+    // element, so a subtree query from the header finds exactly that group.
+
+    const GROUP_BUTTON = 'dsdel-select-all'
+    const SPACER = 'dsdel-flex-spacer'
+    const ALL_BUTTON = 'dsdel-select-all-workspaces'
+    const WORKSPACE_ROWS_HEADER = '[data-sidebar-workspace-header]'
+
+    /**
+     * Position of `node` among `parent`'s element children, or -1.
+     *
+     * `children` is an HTMLCollection in a browser and a plain array in the test
+     * stub. HTMLCollection has no `indexOf`, so the call has to be spelled out.
+     */
+    function childIndex(parent, node) {
+      if (parent === null || parent === undefined) return -1
+      const kids = parent.children
+      if (kids === null || kids === undefined) return -1
+      for (let i = 0; i < kids.length; i += 1) {
+        if (kids[i] === node) return i
+      }
+      return -1
+    }
+
+    /** `data-row-key` of a sidebar row, or null. */
+    function rowKeyOf(node) {
+      if (node === null || node === undefined || typeof node.getAttribute !== 'function') return null
+      return node.getAttribute('data-row-key')
+    }
+
+    /**
+     * The session ids under one workspace header row.
+     *
+     * The row is not always a direct child of its section: the host may wrap it
+     * (a hover card, a drag shell), and a subtree query from that wrapper finds
+     * no sessions at all. So the ancestors are climbed until one of them owns
+     * session rows — that ancestor is the section.
+     */
+    /**
+     * Rows that sit directly in `node`, looking one level into a wrapper.
+     *
+     * The host wraps the workspace row in `HoverCard`'s <span>, so the row's
+     * `parentElement` is that span and not the group section. Whatever contains
+     * the rows also has to be read through it.
+     *
+     * A `div[role="group"]` child is a NESTED workspace: it is skipped, or a
+     * parent's select-all would sweep in its children's sessions.
+     */
+    function ownRows(node) {
+      const rows = []
+      const visit = (parent, depth) => {
+        if (parent === null || parent === undefined || parent.children === undefined) return
+        for (const child of parent.children) {
+          const key = typeof child.getAttribute === 'function' ? child.getAttribute('data-row-key') : null
+          if (key !== null) { rows.push(child); continue }
+          if (depth >= 2) continue
+          if (typeof child.getAttribute === 'function' && child.getAttribute('role') === 'group') continue
+          visit(child, depth + 1)
+        }
+      }
+      visit(node, 0)
+      return rows
+    }
+
+    /**
+     * The session ids under one workspace header row.
+     *
+     * Climbed rather than assumed: a wrapper span put every id out of reach, so
+     * the box ended up with an empty list and `toggleGroup` returned without
+     * doing anything. The climb stops as soon as it reaches a container holding
+     * more than one workspace, which is the shared list — grabbing there would
+     * hand this group every other group's sessions.
+     */
+    function sessionsUnderWorkspace(headRow) {
+      let node = headRow.parentElement
+      for (let depth = 0; depth < 6; depth += 1) {
+        if (node === null || node === undefined) return []
+        const rows = ownRows(node)
+        let workspaces = 0
+        const ids = []
+        for (const row of rows) {
+          const key = rowKeyOf(row)
+          if (typeof key !== 'string') continue
+          if (key.startsWith('workspace:')) workspaces += 1
+          else if (key.startsWith('session:')) ids.push(key.slice('session:'.length))
+        }
+        if (workspaces > 1) return []
+        if (ids.length > 0) return ids
+        node = node.parentElement
+      }
+      return []
+    }
+
+
+    /**
+     * The tri-state a select-all box shows: every id in, none in, or something
+     * between. `mixed` is what tells a user their group is partly ticked.
+     */
+    function groupState(ids) {
+      if (ids.length === 0) return 'false'
+      let picked = 0
+      for (const id of ids) if (state.selected.has(id)) picked += 1
+      if (picked === 0) return 'false'
+      return picked === ids.length ? 'true' : 'mixed'
+    }
+
+    /** Ticking a full or partly ticked box clears the group; an empty one fills it. */
+    function toggleGroup(ids) {
+      if (ids.length === 0) return
+      const fill = groupState(ids) !== 'true'
+      for (const id of ids) {
+        if (fill) state.selected.add(id)
+        else state.selected.delete(id)
+      }
+      publish()
+    }
+
+    /**
+     * Place (or refresh) one of the two boxes. `host` gets nothing appended twice:
+     * the element is looked up by class first, so a decorate pass after a host
+     * re-render reuses the box it already owns.
+     */
+    /**
+     * Place (or refresh) one of the two boxes.
+     *
+     * `anchor` is the class of the element the box should sit IN FRONT OF: the
+     * host pushes its right-hand actions out with an auto margin, so appending at
+     * the end drops the box at the row's far edge. Inserting before those actions
+     * puts it right after the label, which is where it reads as part of the
+     * heading.
+     */
+        function placeGroupBox(host, className, label, ids, anchor) {
+      if (host === null || host === undefined) return
+      let box = typeof host.querySelector === 'function' ? host.querySelector('.' + className) : null
+      const created = box === null
+      if (created) {
+        box = document.createElement('button')
+        box.setAttribute('type', 'button')
+        box.className = className
+        box.setAttribute('role', 'checkbox')
+        box.addEventListener('click', (event) => {
+          // The workspace header toggles its group on click; this box must not.
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+          toggleGroup(box.__dsdelIds || [])
+        })
+      }
+
+      // The anchor is a comma list, tried one at a time: a document-order match
+      // could otherwise pick a later sibling than the caller meant.
+      let before = null
+      if (anchor !== undefined && anchor !== null) {
+        for (const selector of String(anchor).split(',')) {
+          const found = host.querySelector(selector.trim())
+          if (found !== null && found !== undefined) { before = found; break }
+        }
+      }
+
+      // ALWAYS insert, not only on creation. A box placed by an earlier decorate
+      // pass (or an earlier build) kept its old seat forever, because the insert
+      // sat inside the `created` branch: the header box moved on the next pass and
+      // the workspace box did not. `insertBefore` on an existing child just moves
+      // it, so this is idempotent.
+      // One flex child has to absorb the free space, or the whole right-hand
+      // cluster (count, menu, new-session) slides left with the box. The spacer
+      // takes that job so the name can stay at its natural width.
+      let spacer = host.querySelector('.' + SPACER)
+      if (before !== null && before !== undefined) {
+        if (spacer === null) {
+          spacer = document.createElement('span')
+          spacer.className = SPACER
+          spacer.setAttribute('aria-hidden', 'true')
+          spacer.setAttribute('data-dsh-delete-session', 'spacer')
+        }
+        // Only touch the DOM when something is actually out of place. Every
+        // `insertBefore` is a real mutation, and the list observer counted it as
+        // a change: moving the box on every pass fed the observer its own work,
+        // so a new pass was scheduled for the next frame, forever. A click that
+        // landed while the box was detached and re-attached never completed,
+        // which is why it took a dozen taps to hit it once.
+        const boxAt = childIndex(host, box)
+        const spacerAt = childIndex(host, spacer)
+        const beforeAt = childIndex(host, before)
+        if (boxAt === -1 || spacerAt === -1 || beforeAt === -1
+          || boxAt !== spacerAt - 1 || beforeAt !== spacerAt + 1) {
+          host.insertBefore(spacer, before)
+          host.insertBefore(box, spacer)
+        }
+      } else if (created) {
+        host.appendChild(box)
+      }
+
+      box.setAttribute('aria-label', label)
+      box.setAttribute('data-dsh-delete-session', 'select-all')
+      const state_ = groupState(ids)
+      box.setAttribute('aria-checked', state_)
+      box.textContent = state_ === 'true' ? '✓' : (state_ === 'mixed' ? '−' : '')
+      box.__dsdelIds = ids
+    }
+    function decorateSelectAll(rows) {
+      if (!state.selecting) {
+        for (const el of document.querySelectorAll('.' + GROUP_BUTTON)) el.remove()
+        for (const el of document.querySelectorAll('.' + ALL_BUTTON)) el.remove()
+        for (const el of document.querySelectorAll('.' + SPACER)) el.remove()
+        return
+      }
+      const headings = document.querySelectorAll(WORKSPACE_ROWS_HEADER)
+      if (headings.length > 0) {
+        const every = []
+        for (const row of rows) {
+          const key = rowKeyOf(row)
+          if (typeof key === 'string' && key.startsWith('session:')) every.push(key.slice('session:'.length))
+        }
+        // In the heading the label is followed by the search slot; inserting before
+        // it keeps the box beside the words instead of inside the action cluster.
+        // The heading row is: label, search slot, options, add. The box goes after
+        // the label, before the first action it can find.
+        placeGroupBox(headings[0], ALL_BUTTON, t('selectAllWorkspaces'), every,
+          '[class*="_searchSlot"], [class*="_headerActions"]')
+      }
+      for (const row of rows) {
+        const key = rowKeyOf(row)
+        if (typeof key !== 'string' || !key.startsWith('workspace:')) continue
+        // The workspace row is: folder, chevron, label block, then the actions. The
+        // actions carry `margin-left:auto`, so anything appended after them lands at
+        // the far edge; inserting before them keeps the box beside the name.
+        placeGroupBox(row, GROUP_BUTTON, t('selectAllGroup'), sessionsUnderWorkspace(row),
+          '[class*="_rowActions"]')
+      }
+    }
+
     function decorateRows() {
       if (typeof document === 'undefined') return
       const rows = document.querySelectorAll('[role="treeitem"]')
@@ -1115,6 +1380,7 @@ window.__ModuleLoader__.load({
         }
         row.classList.toggle('dsdel-row-pending', state.pending.has(id))
       })
+      decorateSelectAll(rows)
       if (!state.selecting) {
         document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
       }
@@ -1124,16 +1390,32 @@ window.__ModuleLoader__.load({
      * inside the transcript produces characterData records forever; scheduling a
      * full row scan for those would burn a frame's budget on every token.
      */
+    /** True for the nodes this plugin itself inserts into the sidebar. */
+    function isOwnNode(node) {
+      if (node === null || node === undefined || typeof node.getAttribute !== 'function') return false
+      return node.getAttribute('data-dsh-delete-session') !== null
+    }
+
+    function allOwnNodes(list) {
+      if (list === null || list === undefined || list.length === 0) return true
+      for (const node of list) if (!isOwnNode(node)) return false
+      return true
+    }
+
     function onRowMutations(records) {
       if (records === undefined || records === null) return scheduleDecorate()
       for (const record of records) {
         const added = record === null || record === undefined ? null : record.addedNodes
         const removed = record === null || record === undefined ? null : record.removedNodes
-        if ((added !== null && added !== undefined && added.length > 0)
-          || (removed !== null && removed !== undefined && removed.length > 0)) {
-          scheduleDecorate()
-          return
-        }
+        const hasAdded = added !== null && added !== undefined && added.length > 0
+        const hasRemoved = removed !== null && removed !== undefined && removed.length > 0
+        if (!hasAdded && !hasRemoved) continue
+        // Its own boxes and spacers are not a reason to scan again. Counting
+        // them made every pass schedule the next one: a loop that kept moving
+        // the box out from under the cursor.
+        if (allOwnNodes(added) && allOwnNodes(removed)) continue
+        scheduleDecorate()
+        return
       }
     }
 
@@ -1262,7 +1544,12 @@ window.__ModuleLoader__.load({
 
     function onSelectClickCapture(e) {
       if (!state.selecting) return
-      const row = e.target && e.target.closest ? e.target.closest('[role="treeitem"]') : null
+      const target = e.target && typeof e.target.closest === 'function' ? e.target : null
+      // Anything this plugin drew handles its own click. Its document listener
+      // runs first (capture), so without this guard a click on a select-all box
+      // inside a workspace treeitem is swallowed as if the row itself was clicked.
+      if (target !== null && target.closest('[data-dsh-delete-session]') !== null) return
+      const row = target === null ? null : target.closest('[role="treeitem"]')
       if (!row) return
       const id = sessionIdFromRow(row)
       if (!id) return
@@ -1333,6 +1620,12 @@ window.__ModuleLoader__.load({
       document.removeEventListener('keydown', onSelectKeydown, true)
       if (rowObserver) { rowObserver.disconnect(); rowObserver = null }
       document.querySelectorAll('.dsdel-check').forEach((el) => el.remove())
+      // Take the select-all boxes and their spacer with the mode, now rather than
+      // on the next decorate pass: the spacer grows, so a frame of it left behind
+      // would visibly shove the row's right-hand cluster to the left.
+      for (const cls of [GROUP_BUTTON, ALL_BUTTON, SPACER]) {
+        document.querySelectorAll('.' + cls).forEach((el) => el.remove())
+      }
       publish()
     }
 

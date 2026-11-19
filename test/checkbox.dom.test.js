@@ -21,6 +21,7 @@
 //
 //   node --test "test/*.test.js"
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 
 // --- a DOM small enough to read, complete enough to run the plugin ----------
@@ -103,6 +104,15 @@ class StubElement {
   }
 
   insertBefore(child, reference) {
+    // A real DOM MOVES a node it already contains; it never keeps two copies.
+    // The plugin repositions its spacer and its select-all box on every decorate
+    // pass, so a stub that appended instead of moved doubled them: removing one
+    // copy left the other behind and made the cleanup look broken.
+    const previous = child.parentElement
+    if (previous !== null) {
+      const at = previous.children.indexOf(child)
+      if (at !== -1) previous.children.splice(at, 1)
+    }
     child.parentElement = this
     const index = reference === null || reference === undefined ? this.children.length : this.children.indexOf(reference)
     if (index === -1) this.children.push(child)
@@ -215,6 +225,14 @@ const SESSION_B = { id: 'session-bbbb1111-2222-4333-8444-555555555555', title: '
 
 let bundleFactory = null
 
+// Every `loadPlugin()` swaps `globalThis.document`, but the plugin instances of
+// earlier tests are still alive and their queued rAF callbacks call
+// `document.querySelectorAll(...)` on whatever document is installed WHEN THEY
+// FIRE. A pass that lands after the swap decorates the next test's DOM, which
+// is what made three tests flaky. Each harness registers its queue here so the
+// next one can drop the leftovers.
+const rafQueues = []
+
 /**
  * The bundle registers through `window.__ModuleLoader__` once per process and ESM
  * caching means a second `import()` never re-runs it. Caching the factory is also
@@ -297,8 +315,11 @@ async function loadPlugin(options = {}) {
   // synchronous stub would leave `decorateRaf` permanently truthy and silently
   // swallow every later pass. That is a harness artefact, and it would hide the
   // very regression this file exists to catch.
+  // Drop anything an earlier instance queued: it would run against THIS dom.
+  for (const stale of rafQueues) stale.clear()
   let rafId = 0
   const rafQueue = new Map()
+  rafQueues.push(rafQueue)
   globalThis.requestAnimationFrame = (fn) => {
     const id = ++rafId
     rafQueue.set(id, fn)
@@ -573,6 +594,13 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 /** Let the queued rAF decorate passes drain. */
 const flush = async () => { await tick() }
+
+/**
+ * Drain until nothing is left. `flush()` is one tick, and a decorate pass can
+ * queue another callback while it runs; a test that snapshots a counter right
+ * after a single flush occasionally catches a straggler.
+ */
+const settle = async () => { for (let i = 0; i < 20; i += 1) await flush() }
 
 /**
  * Fire the observers multi-select installed. Outside the mode the plugin installs
@@ -2883,4 +2911,671 @@ test('the drop label carries the dragged conversation title', async () => {
 
   const text = JSON.stringify(bar(harness).props.children)
   assert.match(text, /BiliLearn-AI 仓库/, 'the title reaches the sentence')
+})
+test('a workspace header offers a select-all box', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  section.appendChild(header)
+
+  mountRow(harness, SESSION_A, section)
+  mountRow(harness, SESSION_B, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const box = header.querySelector('.dsdel-select-all')
+  assert.ok(box, 'the header carries one')
+  assert.equal(box.getAttribute('role'), 'checkbox')
+  assert.equal(box.getAttribute('aria-checked'), 'false', 'nothing picked yet')
+})
+
+test('the workspace box selects only its own sessions', async () => {
+  const harness = await loadPlugin()
+  const sectionA = harness.document.createElement('div')
+  sectionA.setAttribute('role', 'group')
+  const headA = harness.document.createElement('div')
+  headA.setAttribute('role', 'treeitem')
+  headA.setAttribute('data-row-key', 'workspace:ws-a')
+  sectionA.appendChild(headA)
+  mountRow(harness, SESSION_A, sectionA)
+  harness.document.body.appendChild(sectionA)
+
+  const sectionB = harness.document.createElement('div')
+  sectionB.setAttribute('role', 'group')
+  const headB = harness.document.createElement('div')
+  headB.setAttribute('role', 'treeitem')
+  headB.setAttribute('data-row-key', 'workspace:ws-b')
+  sectionB.appendChild(headB)
+  mountRow(harness, SESSION_B, sectionB)
+  harness.document.body.appendChild(sectionB)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  headA.querySelector('.dsdel-select-all').fire('click')
+  await flush()
+
+  assert.equal(headA.querySelector('.dsdel-select-all').getAttribute('aria-checked'), 'true', 'A turned on')
+  const boxB = headB.querySelector('.dsdel-select-all')
+  assert.equal(boxB.getAttribute('aria-checked'), 'false', 'B untouched')
+})
+
+test('a second press clears the workspace again', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const box = header.querySelector('.dsdel-select-all')
+  box.fire('click')
+  await flush()
+  assert.equal(box.getAttribute('aria-checked'), 'true')
+
+  box.fire('click')
+  await flush()
+  assert.equal(box.getAttribute('aria-checked'), 'false')
+})
+
+test('the box reports a partly picked workspace as mixed', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  section.appendChild(header)
+  const rowA = mountRow(harness, SESSION_A, section)
+  mountRow(harness, SESSION_B, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  clickRowIn(harness, rowA)
+  observerPass(harness)
+  await flush()
+
+  assert.equal(header.querySelector('.dsdel-select-all').getAttribute('aria-checked'), 'mixed')
+})
+
+test('the heading row selects every workspace at once', async () => {
+  const harness = await loadPlugin()
+  const heading = harness.document.createElement('div')
+  heading.setAttribute('data-sidebar-workspace-header', '')
+  harness.document.body.appendChild(heading)
+
+  const sectionA = harness.document.createElement('div')
+  sectionA.setAttribute('role', 'group')
+  const headA = harness.document.createElement('div')
+  headA.setAttribute('role', 'treeitem')
+  headA.setAttribute('data-row-key', 'workspace:ws-a')
+  sectionA.appendChild(headA)
+  mountRow(harness, SESSION_A, sectionA)
+  harness.document.body.appendChild(sectionA)
+
+  const sectionB = harness.document.createElement('div')
+  sectionB.setAttribute('role', 'group')
+  const headB = harness.document.createElement('div')
+  headB.setAttribute('role', 'treeitem')
+  headB.setAttribute('data-row-key', 'workspace:ws-b')
+  sectionB.appendChild(headB)
+  mountRow(harness, SESSION_B, sectionB)
+  harness.document.body.appendChild(sectionB)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const all = heading.querySelector('.dsdel-select-all-workspaces')
+  assert.ok(all, 'the heading carries the global box')
+  all.fire('click')
+  await flush()
+
+  assert.equal(all.getAttribute('aria-checked'), 'true', 'everything picked')
+  assert.equal(headA.querySelector('.dsdel-select-all').getAttribute('aria-checked'), 'true')
+  assert.equal(headB.querySelector('.dsdel-select-all').getAttribute('aria-checked'), 'true')
+})
+
+test('both boxes go away when the mode ends', async () => {
+  const harness = await loadPlugin()
+  const heading = harness.document.createElement('div')
+  heading.setAttribute('data-sidebar-workspace-header', '')
+  harness.document.body.appendChild(heading)
+
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+  assert.ok(header.querySelector('.dsdel-select-all'), 'present during the mode')
+  assert.ok(heading.querySelector('.dsdel-select-all-workspaces'))
+
+  harness.document.dispatchToDocument('keydown', { key: 'Escape', stopPropagation() {} })
+  observerPass(harness)
+  await flush()
+
+  assert.equal(header.querySelector('.dsdel-select-all'), null, 'removed with the mode')
+  assert.equal(heading.querySelector('.dsdel-select-all-workspaces'), null)
+})
+
+test('the select-all boxes do not lean on the page token scope', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  // The boxes render inside the SIDEBAR. The `--dsdel-*` tokens are declared on
+  // `.dsdel-page`, `.dsdel-modal` and `.dsdel-bar` only, so any rule outside those
+  // scopes that reads them gets an invalid value and loses the whole declaration.
+  // That is how the first version shipped an invisible button: `border` was
+  // dropped, leaving no box and nothing to click.
+  const rules = [...css.matchAll(/(?:^|\})\s*\.dsdel-select-all[^{]*\{([^}]*)\}/g)]
+  assert.ok(rules.length > 0, 'the rules are in the stylesheet')
+  for (const match of rules) {
+    assert.equal(match[1].includes('--dsdel-'), false,
+      'a sidebar rule must not read the page tokens: ' + match[0].slice(0, 60))
+  }
+
+  // Every host alias carries a literal fallback, so the box still draws when the
+  // host renames its palette.
+  assert.match(css, /\.dsdel-select-all[^}]*var\(--dsw-alias-border-l2,[^)]*\)/, 'border has a fallback')
+  assert.match(css, /\.dsdel-select-all[^}]*var\(--dsw-alias-brand-primary,[^)]*\)/, 'brand has a fallback')
+})
+
+test('a box always keeps a visible 15px square', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  // A flex child with no width collapses to its content, and the empty state has
+  // no content: `width` plus `min-width` plus content-box sizing is what makes the
+  // square exist before anything is ticked.
+  assert.match(css, /\.dsdel-select-all[^}]*width:15px/, 'a fixed width')
+  assert.match(css, /\.dsdel-select-all[^}]*height:15px/, 'and a fixed height')
+  assert.match(css, /\.dsdel-select-all[^}]*min-width:15px/, 'that flex cannot shrink away')
+  assert.match(css, /\.dsdel-select-all[^}]*box-sizing:border-box/, 'with the border inside it')
+})
+
+test('the workspace box sits beside the name, not at the row edge', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+
+  // The host row: label block, then the action cluster (which carries margin-left:auto).
+  const label = harness.document.createElement('span')
+  label.className = 'YDXeBa_projectText'
+  header.appendChild(label)
+  const actions = harness.document.createElement('span')
+  actions.className = 'YDXeBa_rowActions'
+  header.appendChild(actions)
+
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const box = header.querySelector('.dsdel-select-all')
+  assert.ok(box, 'the box exists')
+
+  // Appending put it after the action cluster, whose auto margin pushes it into the
+  // far right of the row — that is the "靠右" the screenshot showed. It has to be
+  // inserted before the actions instead.
+  const index = header.children.indexOf(box)
+  const actionsIndex = header.children.indexOf(actions)
+  assert.equal(index < actionsIndex, true, 'the box comes before the action cluster')
+  assert.equal(header.children[index - 1].className, 'YDXeBa_projectText', 'and right after the label')
+})
+
+test('the global box sits after the heading label, before the search slot', async () => {
+  const harness = await loadPlugin()
+
+  const heading = harness.document.createElement('div')
+  heading.setAttribute('data-sidebar-workspace-header', '')
+
+  const label = harness.document.createElement('span')
+  label.className = 'bhn1Oq_sectionLabel'
+  heading.appendChild(label)
+  const search = harness.document.createElement('div')
+  search.className = 'bhn1Oq_searchSlot'
+  heading.appendChild(search)
+
+  harness.document.body.appendChild(heading)
+
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const box = heading.querySelector('.dsdel-select-all-workspaces')
+  assert.ok(box, 'the global box exists')
+  const index = heading.children.indexOf(box)
+  assert.equal(index < heading.children.indexOf(search), true, 'before the search slot')
+  assert.equal(heading.children[index - 1].className, 'bhn1Oq_sectionLabel', 'and after the label')
+})
+
+test('a box left at the wrong edge is moved on the next pass', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+
+  const label = harness.document.createElement('span')
+  label.className = 'wnFoaW_projectText'
+  header.appendChild(label)
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+
+  // An earlier build left its box AFTER the actions: the far edge.
+  const stale = harness.document.createElement('button')
+  stale.className = 'dsdel-select-all'
+  header.appendChild(stale)
+
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  // The insert used to live inside the "created" branch, so an existing box was
+  // never repositioned: the heading box moved and the workspace box stayed put.
+  const index = header.children.indexOf(stale)
+  assert.equal(index < header.children.indexOf(actions), true, 'moved before the actions')
+  assert.equal(header.children[index - 1].className, 'wnFoaW_projectText', 'and beside the label')
+})
+
+test('the workspace name stops absorbing the row while the mode runs', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  // `.projectText` carries `flex:1`, so it fills whatever the actions do not take.
+  // A box inserted after it therefore lands at the row's far edge even though it
+  // is early in the child list — that is why the workspace box stayed right while
+  // the header box (whose label is not flexed) moved. The rule only applies while
+  // the mode runs, so the host keeps its normal layout otherwise.
+  assert.match(css, /body\.dsdel-selecting \[class\*="_projectText"\]\{[^}]*flex:0 1 auto/,
+    'the name sizes to its text during the mode')
+  assert.match(css, /body\.dsdel-selecting \[class\*="_projectText"\]\{[^}]*min-width:0/,
+    'and can still truncate a long name')
+})
+
+test('a spacer keeps the right-hand cluster in place', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+
+  const label = harness.document.createElement('span')
+  label.className = 'wnFoaW_projectText'
+  header.appendChild(label)
+  // The cluster that must NOT move: count, menu, new-session.
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  // Order has to be: label, box, spacer, actions. With the spacer growing, the
+  // name keeps its natural width and the cluster stays at the row's end; without
+  // it, every flex child simply packs left and the count/menu/new buttons slid
+  // over with the box.
+  const kids = header.children
+  const box = header.querySelector('.dsdel-select-all')
+  const spacer = header.querySelector('.dsdel-flex-spacer')
+  assert.ok(box, 'the box exists')
+  assert.ok(spacer, 'the spacer exists')
+
+  assert.equal(kids.indexOf(box) < kids.indexOf(spacer), true, 'box before spacer')
+  assert.equal(kids.indexOf(spacer) < kids.indexOf(actions), true, 'spacer before the cluster')
+  assert.equal(kids.indexOf(label) < kids.indexOf(box), true, 'label first')
+})
+
+test('the spacer is removed with the mode', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  const label = harness.document.createElement('span')
+  label.className = 'wnFoaW_projectText'
+  header.appendChild(label)
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+  assert.ok(header.querySelector('.dsdel-flex-spacer'), 'spacer present during the mode')
+
+  // The bar's Cancel is the mode's own exit route. Escape would also reach
+  // handlers left behind by earlier tests: the stub never unregisters one.
+  clickBar(barCancel(harness))
+  observerPass(harness)
+  await flush()
+  assert.equal(header.querySelector('.dsdel-flex-spacer'), null, 'gone with the mode')
+  assert.equal(header.querySelector('.dsdel-select-all'), null, 'and so is the box')
+})
+
+test('PROBE exit removes spacer', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const before = harness.document.querySelectorAll('.dsdel-flex-spacer').length
+  console.log('PROBE 装饰后 spacer 数:', before)
+  for (const el of harness.document.querySelectorAll('.dsdel-flex-spacer')) {
+    console.log('PROBE spacer parent:', el.parentElement && el.parentElement.getAttribute('data-row-key'), 'idx:', el.parentElement ? el.parentElement.children.indexOf(el) : -1)
+  }
+  const cancel = barCancel(harness)
+  console.log('PROBE cancel 节点:', cancel && cancel.props && cancel.props.className)
+  clickBar(cancel)
+  await flush()
+  console.log('PROBE 退出后 spacer 数:', harness.document.querySelectorAll('.dsdel-flex-spacer').length)
+  assert.ok(true)
+})
+
+test('the spacer is the growing child, so the cluster keeps its seat', async () => {
+  const harness = await loadPlugin()
+  const css = String(harness.document.head.querySelector('[data-dsh-delete-session="1"]')._text ?? '')
+
+  // Without a growing child the flex row simply packs left, which drags the count
+  // and the action buttons along with the box. The spacer is what holds them at
+  // the row's end while the box sits beside the name.
+  assert.match(css, /\.dsdel-flex-spacer\{[^}]*flex:1/, 'the spacer grows')
+  assert.match(css, /\.dsdel-flex-spacer\{[^}]*min-width:0/, 'and can collapse when space is tight')
+  assert.match(css, /\.dsdel-select-all[^}]*flex:0 0 auto/, 'the box itself does not grow')
+})
+
+test('a document click on a plugin-drawn element leaves the session alone', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+  assert.equal(harness.document.body.className.includes('dsdel-selecting'), true)
+
+  // The document capture listener runs before any element handler. It must ignore
+  // elements this plugin drew — a box inside a workspace row is the everyday case,
+  // and inside a session row it would otherwise toggle that session.
+  const box = harness.document.createElement('button')
+  box.className = 'dsdel-select-all'
+  box.setAttribute('data-dsh-delete-session', 'select-all')
+  row.appendChild(box)
+
+  clickRowIn(harness, box)
+  observerPass(harness)
+  await flush()
+
+  const check = row.querySelector('.dsdel-check')
+  assert.equal(check.classList.contains('dsdel-check-on'), false, 'no session was toggled')
+})
+
+test('the row handler still works for a real session row', async () => {
+  const harness = await loadPlugin()
+  const row = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  clickRowIn(harness, row)
+  await flush()
+
+  const check = row.querySelector('.dsdel-check')
+  assert.equal(check.classList.contains('dsdel-check-on'), true, 'a plain row still toggles')
+})
+
+test('a decorate pass with nothing to move keeps the box where it is', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  const label = harness.document.createElement('span')
+  label.className = 'wnFoaW_projectText'
+  header.appendChild(label)
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  // Every insertBefore is a mutation, and the list observer counted it as a
+  // reason to scan again: each pass scheduled the next one, forever, and the box
+  // was detached and re-attached under the pointer. Nothing may move here — the
+  // box and its spacer are already in the right place.
+  const box = header.querySelector('.dsdel-select-all')
+  const spacer = header.querySelector('.dsdel-flex-spacer')
+  const index = header.children.indexOf(box)
+
+  // Re-inserting a node where it already sits leaves its index unchanged, so the
+  // index alone cannot prove the pass was quiet. Count the calls instead: a real
+  // insertBefore produces a MutationRecord, and the observer used to feed on them.
+  const realInsert = header.insertBefore.bind(header)
+  let inserts = 0
+  header.insertBefore = (child, ref) => { inserts += 1; return realInsert(child, ref) }
+
+  observerPass(harness)
+  observerPass(harness)
+  await flush()
+
+  assert.equal(inserts, 0, 'a settled row is left untouched')
+
+  assert.equal(header.children.indexOf(box), index, 'the box did not move')
+  assert.equal(header.children.indexOf(spacer), index + 1, 'nor did the spacer')
+  assert.equal(header.children.filter((el) => el === box).length, 1, 'and there is only one')
+})
+
+test('a mutation naming only our own nodes schedules no pass', async () => {
+  const harness = await loadPlugin()
+
+  // Drive the frame queue by hand: a timer-based flush made this test flaky,
+  // because a pass can queue another callback while it runs.
+  //
+  // Note the drain: emptying the queue without running its callbacks leaves the
+  // plugin's `decorateRaf` handle truthy, and every later `scheduleDecorate`
+  // silently returns. That is a harness trap, not a product bug.
+  const queued = []
+  const realRaf = globalThis.requestAnimationFrame
+  const realCancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = (fn) => { queued.push(fn); return queued.length }
+  globalThis.cancelAnimationFrame = () => {}
+  const drain = () => { let guard = 0; while (queued.length > 0 && guard < 50) { guard += 1; queued.shift()() } }
+
+  try {
+    await enterMulti(harness)
+    drain()
+
+    // A row that arrives after the last pass carries no checkbox, so whether a
+    // pass runs is readable straight off the DOM.
+    const section = harness.document.createElement('div')
+    section.setAttribute('role', 'group')
+    const hostRow = harness.document.createElement('div')
+    hostRow.setAttribute('role', 'treeitem')
+    hostRow.setAttribute('data-row-key', 'session:session-cccc1111-2222-4333-8444-555555555555')
+    section.appendChild(hostRow)
+    harness.document.body.appendChild(section)
+    assert.equal(hostRow.querySelector('.dsdel-check'), null, 'the row is undecorated')
+
+    // Decorate inserts checkboxes, and the list observer reports them right back.
+    // Every such record used to schedule another pass, so the loop never settled:
+    // the box was re-inserted under the pointer and a click often missed.
+    const own = harness.document.createElement('span')
+    own.setAttribute('data-dsh-delete-session', 'check')
+    harness.observers[0].callback([{ addedNodes: [own], removedNodes: [] }])
+    assert.equal(queued.length, 0, 'our own node schedules nothing')
+
+    // A host change must still get through.
+    harness.observers[0].callback([{ addedNodes: [hostRow], removedNodes: [] }])
+    assert.equal(queued.length, 1, 'a real host row schedules one pass')
+    drain()
+    assert.ok(hostRow.querySelector('.dsdel-check'), 'and that pass decorates it')
+  } finally {
+    globalThis.requestAnimationFrame = realRaf
+    globalThis.cancelAnimationFrame = realCancel
+  }
+})
+
+test('the plugin never calls array methods on a live child list', async () => {
+  const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+
+  // In a browser `element.children` is an HTMLCollection: it has `length` and
+  // indexing, and none of the Array methods. The test stub uses a plain array, so
+  // `children.indexOf(...)` passed here and threw a TypeError in the real host —
+  // the decorate pass died before inserting anything, and the select-all box never
+  // appeared. Index it by hand (`childIndex`) or spread it first.
+  const offenders = []
+  for (const match of source.matchAll(/\.children\.([A-Za-z]+)\s*\(/g)) {
+    offenders.push(match[0])
+  }
+  assert.deepEqual(offenders, [], 'no Array methods on `children`')
+})
+
+test('the workspace box reaches past a wrapping element', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+
+  // The real host wraps the workspace row in HoverCard's <span>, so the row's
+  // parentElement is that span, not the section. A subtree query from the span
+  // returns only the workspace row itself and the box ends up with no ids —
+  // `toggleGroup` then returns without doing anything, which is exactly the
+  // "single-workspace select-all does nothing" report.
+  const wrapper = harness.document.createElement('span')
+  wrapper.className = 'HoverCard_root'
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:ws-a')
+  const label = harness.document.createElement('span')
+  label.className = 'wnFoaW_projectText'
+  header.appendChild(label)
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+  wrapper.appendChild(header)
+  section.appendChild(wrapper)
+
+  mountRow(harness, SESSION_A, section)
+  mountRow(harness, SESSION_B, section)
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const box = header.querySelector('.dsdel-select-all')
+  assert.ok(box, 'the box exists')
+  assert.deepEqual(box.__dsdelIds, [SESSION_A.id, SESSION_B.id], 'both sessions were found')
+
+  box.fire('click')
+  await flush()
+  assert.equal(box.getAttribute('aria-checked'), 'true', 'and pressing it selects them')
+})
+
+test('a workspace box never reaches into a nested workspace', async () => {
+  const harness = await loadPlugin()
+  const section = harness.document.createElement('div')
+  section.setAttribute('role', 'group')
+
+  const header = harness.document.createElement('div')
+  header.setAttribute('role', 'treeitem')
+  header.setAttribute('data-row-key', 'workspace:outer')
+  const actions = harness.document.createElement('span')
+  actions.className = 'wnFoaW_rowActions'
+  header.appendChild(actions)
+  section.appendChild(header)
+  mountRow(harness, SESSION_A, section)
+
+  // A nested workspace is a `div[role="group"]` holding its own rows.
+  const nested = harness.document.createElement('div')
+  nested.setAttribute('role', 'group')
+  const nestedHeader = harness.document.createElement('div')
+  nestedHeader.setAttribute('role', 'treeitem')
+  nestedHeader.setAttribute('data-row-key', 'workspace:inner')
+  nested.appendChild(nestedHeader)
+  mountRow(harness, SESSION_B, nested)
+  section.appendChild(nested)
+
+  harness.document.body.appendChild(section)
+
+  await enterMulti(harness)
+  observerPass(harness)
+  await flush()
+
+  const box = header.querySelector('.dsdel-select-all')
+  assert.deepEqual(box.__dsdelIds, [SESSION_A.id], 'only the outer group\'s own session')
 })
