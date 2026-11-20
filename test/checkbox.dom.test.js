@@ -549,6 +549,51 @@ function mountRow(harness, session = SESSION_A, parent = null) {
 const menuEntry = (harness, id) =>
   harness.slotRegistrations.find((entry) => entry.spec.name === MENU_SLOT && entry.spec.id === id) ?? null
 
+/** The batch checklist overlay, rendered the way the host renders it. */
+const batchPlanEntry = (harness) =>
+  harness.slotRegistrations.find((entry) => entry.spec.name === 'shell.overlay'
+    && entry.spec.id === NS + '-batchplan') ?? null
+
+const batchPlan = (harness) => {
+  const entry = batchPlanEntry(harness)
+  if (entry === null) return null
+  return entry.Component({ t: harness.t })
+}
+
+const childList = (node) => {
+  if (node === null || node === undefined || node.props === undefined) return []
+  const children = node.props.children
+  if (children === null || children === undefined) return []
+  return Array.isArray(children) ? children.filter(Boolean) : [children]
+}
+
+/** Every file row the checklist renders, as `{ path, input }`. */
+function batchFileRows(harness) {
+  const modal = batchPlan(harness)
+  if (modal === null) return []
+  const rows = []
+  for (const node of childList(modal)) {
+    if (node.props === undefined || node.props['data-file-row'] === undefined) continue
+    const label = childList(node).find((child) => child.type === 'label')
+    const input = label === undefined
+      ? null
+      : childList(label).find((child) => child.props && child.props.type === 'checkbox')
+    rows.push({ path: node.props['data-file-row'], input: input ?? null })
+  }
+  return rows
+}
+
+/** Invoke one footer button of the checklist. */
+function clickBatchPlan(harness, key) {
+  const modal = batchPlan(harness)
+  if (modal === null) return false
+  const footer = (modal.props.footer ?? []).filter(Boolean)
+  const button = footer.find((node) => node.props && node.props.key === key)
+  if (button === undefined) return false
+  button.props.onClick()
+  return true
+}
+
 const overlayEntry = (harness) =>
   harness.slotRegistrations.find((entry) => entry.spec.name === 'shell.overlay') ?? null
 
@@ -3875,7 +3920,7 @@ test('multi-select delete leaves the files alone when the switch is off', async 
   assert.equal('quarantine' in bodies[0], false, 'and does not move any file')
 })
 
-test('a batch in asking mode says the files were left alone', async () => {
+test('a batch in asking mode opens a checklist instead of deleting straight away', async () => {
   const harness = await loadPlugin()
   localStorage.setItem(OFF_KEY, '0')
   localStorage.setItem(AUTO_KEY, '0')
@@ -3886,11 +3931,136 @@ test('a batch in asking mode says the files were left alone', async () => {
 
   clickBar(barDelete(harness))
   await settle()
+
+  // Issue #4: asking mode must show a list. It used to delete first and only say
+  // afterwards that the files had been left alone.
+  assert.equal(deleteCalls(harness), 0, 'nothing deleted before the user confirmed')
+  assert.ok(batchPlan(harness) !== null, 'the checklist opened')
+})
+
+test('the batch checklist lists every selected session and its files', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '0')
+  const first = mountRow(harness, SESSION_A)
+  const second = mountRow(harness, SESSION_B)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  clickRowIn(harness, second)
+  await flush()
+
+  clickBar(barDelete(harness))
+  await settle()
+
+  // The checklist covers the whole selection, not just whichever session happened
+  // to be first: the stub answers every scan with the same PLAN, so two sessions
+  // with two created files each make four rows.
+  const rows = batchFileRows(harness)
+  assert.equal(rows.length, 4, 'two sessions, two files each, saw ' + rows.length)
+})
+
+test('confirming the checklist sends each session its own file list', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '0')
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+  clickBar(barDelete(harness))
+  await settle()
+
+  assert.equal(clickBatchPlan(harness, 'confirm'), true, 'the checklist has a confirm')
+  await settle()
   for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
 
-  // Asking means a per-file checklist, which a batch has nowhere to show. Silence
-  // would look like the files had been handled.
-  const said = toasts(harness).join(' | ')
-  assert.equal(said.includes('产出文件没有处理'), true, 'the user is told: ' + said)
-  assert.equal('quarantine' in deleteBody(harness), false, 'and nothing was moved')
+  // `paths` is the whole point: the host intersects it with its own derived set,
+  // so sending it can only narrow the move, never widen it.
+  const body = deleteBody(harness)
+  assert.ok(body, 'a delete went out')
+  assert.ok(body.quarantine, 'the delete carries a quarantine plan')
+  assert.ok(Array.isArray(body.quarantine.paths), 'and an explicit file list')
+})
+
+test('unticking a file keeps it out of the request', async () => {
+  const harness = await loadPlugin({ plan: PLAN })
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '0')
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+  clickBar(barDelete(harness))
+  await settle()
+
+  const rows = batchFileRows(harness)
+  assert.ok(rows.length >= 1, 'the fixture has at least one file')
+  // Untick through the input the user would click, not through store internals.
+  rows[0].input.props.onChange({ target: { checked: false } })
+  await flush()
+
+  // The box itself has to show the new state: a checkbox that stays ticked while
+  // the file is no longer in the request is a lie about what will happen.
+  const after = batchFileRows(harness)
+  assert.equal(after[0].input.props.checked, false, 'the unticked row renders unticked')
+
+  assert.equal(clickBatchPlan(harness, 'confirm'), true)
+  await settle()
+  for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
+
+  const body = deleteBody(harness)
+  assert.equal(body.quarantine.paths.includes(rows[0].path), false, 'the unticked file stays put')
+})
+
+test('cancelling the checklist deletes nothing', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '0')
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+  clickBar(barDelete(harness))
+  await settle()
+
+  assert.equal(clickBatchPlan(harness, 'cancel'), true, 'the checklist has a cancel')
+  await flush()
+
+  assert.equal(deleteCalls(harness), 0, 'no delete went out')
+  assert.equal(batchPlan(harness), null, 'and the dialog closed')
+})
+
+test('auto mode still deletes straight through, with no checklist', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '0')
+  localStorage.setItem(AUTO_KEY, '1')
+  localStorage.setItem(SKIP_KEY, '1')
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+  clickBar(barDelete(harness))
+  await settle()
+  for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
+
+  assert.equal(batchPlan(harness), null, 'no checklist in auto mode')
+  assert.equal(deleteCalls(harness), 1, 'the delete ran')
+  assert.deepEqual(deleteBody(harness).quarantine, { scope: 'created' }, 'the derived set, not a list')
+})
+
+test('the feature off deletes straight through too', async () => {
+  const harness = await loadPlugin()
+  localStorage.setItem(OFF_KEY, '1')
+  localStorage.setItem(SKIP_KEY, '1')
+  const first = mountRow(harness, SESSION_A)
+  await enterMulti(harness)
+  clickRowIn(harness, first)
+  await flush()
+  clickBar(barDelete(harness))
+  await settle()
+  for (let i = 0; i < 40 && bar(harness) !== null; i += 1) await flush()
+
+  assert.equal(batchPlan(harness), null, 'the dialog never opened')
+  assert.equal(deleteCalls(harness), 1, 'the delete ran')
+  assert.equal('quarantine' in deleteBody(harness), false, 'and touched no file')
 })

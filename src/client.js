@@ -61,6 +61,12 @@ window.__ModuleLoader__.load({
       batchPartial: (ok, fail) => `已删除 ${ok} 个，${fail} 个失败`,
       batchDoneQuarantine: (n, m) => `已删除 ${n} 个会话，${m} 个文件已移入隔离夹`,
       batchDoneQuarantineFailed: (n, ok, fail) => `已删除 ${n} 个会话，隔离 ${ok} 个、${fail} 个失败`,
+      batchPlanTitle: '这批会话的产出文件',
+      batchPlanScanning: (done, total) => `正在读取会话记录… ${done}/${total}`,
+      batchPlanSummary: (sessions, files) => `${sessions} 个会话，共 ${files} 个文件`,
+      batchPlanAll: (picked, total) => `全选（已选 ${picked}/${total}）`,
+      batchPlanSession: (picked, total) => `这个小节已选 ${picked}/${total}`,
+      batchPlanEmpty: '这些会话都没有产出文件，删除只清理对话记录。',
       batchAskArtifacts: '这批会话的产出文件没有处理：批量删除不列逐文件清单。要处理它们，请单个删除，或在插件页改成「产出文件默认全部进隔离夹」。',
       batchFailed: '批量删除失败：',
       pageAsk: '删除时询问',
@@ -173,6 +179,12 @@ window.__ModuleLoader__.load({
       batchPartial: (ok, fail) => `Deleted ${ok}, ${fail} failed`,
       batchDoneQuarantine: (n, m) => `Deleted ${n} session(s), ${m} file(s) moved to quarantine`,
       batchDoneQuarantineFailed: (n, ok, fail) => `Deleted ${n} session(s), ${ok} quarantined and ${fail} failed`,
+      batchPlanTitle: 'Produced files in these sessions',
+      batchPlanScanning: (done, total) => `Reading the session logs… ${done}/${total}`,
+      batchPlanSummary: (sessions, files) => `${sessions} sessions, ${files} files`,
+      batchPlanAll: (picked, total) => `Select all (${picked}/${total} ticked)`,
+      batchPlanSession: (picked, total) => `${picked}/${total} ticked in this session`,
+      batchPlanEmpty: 'None of these sessions produced files; deleting them only clears the conversation logs.',
       batchAskArtifacts: 'The produced files of these sessions were left alone: a batch has no per-file checklist. Delete them one by one, or switch the plugin page to "move every produced file to quarantine".',
       batchFailed: 'Batch delete failed: ',
       pageAsk: 'Ask before deleting',
@@ -282,6 +294,12 @@ window.__ModuleLoader__.load({
       batchPartial: (ok, fail) => `Удалено ${ok}, не удалось ${fail}`,
       batchDoneQuarantine: (n, m) => `Удалено сессий: ${n}, файлов в карантине: ${m}`,
       batchDoneQuarantineFailed: (n, ok, fail) => `Удалено сессий: ${n}, в карантине ${ok}, не удалось ${fail}`,
+      batchPlanTitle: 'Файлы этих сессий',
+      batchPlanScanning: (done, total) => `Читаю журналы сессий… ${done}/${total}`,
+      batchPlanSummary: (sessions, files) => `${sessions} сессий, ${files} файлов`,
+      batchPlanAll: (picked, total) => `Выбрать все (${picked}/${total})`,
+      batchPlanSession: (picked, total) => `В этой сессии отмечено ${picked}/${total}`,
+      batchPlanEmpty: 'Ни одна из этих сессий не создавала файлов; удаление очистит только журналы диалогов.',
       batchAskArtifacts: 'Файлы этих сессий не обработаны: пакетное удаление не показывает список файлов. Удаляйте по одному или переключите страницу плагина на «все созданные файлы в карантин». ',
       batchFailed: 'Массовое удаление не удалось: ',
       pageAsk: 'Спрашивать перед удалением',
@@ -527,6 +545,13 @@ window.__ModuleLoader__.load({
       pending: new Set(),
       /** { total, done, failed } while a batch delete runs, else null. */
       batch: null,
+      /**
+       * The aggregated file checklist a batch in asking mode shows before it
+       * deletes anything: { scanning, scanned, total, error, sessions[] }.
+       * Asking means the user picks the files, and a batch of sessions has no
+       * per-session dialog to pick them in - so the choice is made here, once.
+       */
+      batchPlan: null,
       /** Folder-picker state while it is open, else null. */
       picker: null,
       /** The host's default quarantine root, fetched once so the card can name it. */
@@ -547,6 +572,7 @@ window.__ModuleLoader__.load({
         selected: state.selected,
         pending: state.pending,
         batch: state.batch,
+        batchPlan: state.batchPlan,
         picker: state.picker,
         defaultRoot: state.defaultRoot,
         drag: state.drag,
@@ -1128,6 +1154,7 @@ window.__ModuleLoader__.load({
       '.dsdel-dialog-wide > :first-child{flex:1 1 auto;min-height:0;overflow:auto}',
       '.dsdel-dialog-wide > :last-child{flex:0 0 auto;margin-top:auto}',
       '.dsdel-artifacts{overflow:auto;overscroll-behavior:contain;padding-right:2px}',
+      '.dsdel-batch-row{padding-left:22px}',
       '[role="dialog"]:has(.dsdel-file-row),[aria-modal="true"]:has(.dsdel-file-row){width:min(46vw,860px);max-width:min(46vw,860px);min-height:min(240px,88vh);max-height:88vh}',
       '.dsdel-picker-list{display:flex;flex-direction:column;gap:2px;max-height:280px;overflow:auto;margin:0 0 8px}',
       '.dsdel-picker-row{appearance:none;text-align:left;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;cursor:pointer}',
@@ -1671,7 +1698,7 @@ window.__ModuleLoader__.load({
           disabled: busy || empty,
           onClick: (event) => {
             if (event && event.stopPropagation) event.stopPropagation()
-            runBatchDelete()
+            beginBatchDelete()
           },
         }, translate('deleteSelected')),
       )
@@ -1750,6 +1777,7 @@ window.__ModuleLoader__.load({
       state.selecting = false
       state.selected.clear()
       state.batch = null
+      state.batchPlan = null
       const keepPending = !!(options && options.keepPending)
       if (!keepPending) {
         state.pending.clear()
@@ -1785,7 +1813,169 @@ window.__ModuleLoader__.load({
     // （I/O 并行度约在 8 饱和），6 路比 4 路快约 1/3 且仍在饱和点以下。
     const BATCH_CONCURRENCY = 6
 
-    function runBatchDelete() {
+    /** How many sessions one checklist scan reads at a time. */
+    const SCAN_CONCURRENCY = 4
+
+    /**
+     * The bar's Delete: straight through in auto/off mode, a checklist in asking
+     * mode.
+     *
+     * Asking means the user chooses the files, and the single path honours that by
+     * showing a list inside the confirmation dialog. A batch has no such dialog -
+     * it deletes several sessions at once - so leaving it out was the whole of
+     * issue #4: the feature was on, the files stayed put, and the only signal was
+     * a toast afterwards. Here the choice is made once, over every session in the
+     * selection, before anything is deleted.
+     */
+    function beginBatchDelete() {
+      if (state.batch !== null || state.batchPlan !== null) return
+      if (state.selected.size === 0) return
+      if (artifactsOff() || artifactsAuto()) {
+        runBatchDelete()
+        return
+      }
+      startBatchScan()
+    }
+
+    /** The title the sidebar row shows, for naming a session in the checklist. */
+    function titleForSession(id) {
+      if (typeof document === 'undefined') return null
+      const key = `session:${id}`
+      let row = null
+      try {
+        for (const candidate of document.querySelectorAll('[role="treeitem"]')) {
+          if (rowKeyOf(candidate) === key) { row = candidate; break }
+        }
+      } catch { /* no DOM: fall back to the id */ }
+      const text = row !== null && typeof row.textContent === 'string' ? row.textContent.trim() : ''
+      return text === '' ? null : text.slice(0, 60)
+    }
+
+    /**
+     * Read every selected session's plan, then show the checklist.
+     *
+     * The scan is read-only and per-session, so it runs concurrently with a small
+     * pool: one long-lived conversation can name hundreds of paths, and a batch of
+     * twenty would otherwise serialize twenty of those scans in front of the
+     * dialog.
+     */
+    function startBatchScan() {
+      const ids = [...state.selected]
+      const scope = artifactScope()
+      const skipGit = skipGitRepos()
+      state.batchPlan = {
+        scanning: true,
+        scanned: 0,
+        error: null,
+        scope,
+        skipGit,
+        sessions: ids.map((id) => ({
+          id,
+          title: titleForSession(id),
+          loading: true,
+          error: null,
+          plan: null,
+          selected: new Set(),
+        })),
+      }
+      publish()
+
+      let cursor = 0
+      const worker = async () => {
+        while (true) {
+          const index = cursor
+          cursor += 1
+          const plan = state.batchPlan
+          if (plan === null || index >= plan.sessions.length) return
+          const entry = plan.sessions[index]
+          try {
+            const artifacts = await postArtifacts(entry.id)
+            // The dialog may have been closed while this was in flight.
+            const current = state.batchPlan
+            if (current === null) return
+            entry.plan = artifacts
+            entry.selected = new Set(candidatePaths(artifacts, scope))
+          } catch (reason) {
+            const current = state.batchPlan
+            if (current === null) return
+            entry.error = String((reason && reason.message) || reason)
+          }
+          entry.loading = false
+          if (state.batchPlan !== null) state.batchPlan.scanned += 1
+          publish()
+        }
+      }
+      const workers = []
+      for (let i = 0; i < Math.min(SCAN_CONCURRENCY, ids.length); i += 1) workers.push(worker())
+      Promise.all(workers).then(() => {
+        if (state.batchPlan !== null) {
+          state.batchPlan.scanning = false
+          publish()
+        }
+      })
+    }
+
+    function closeBatchPlan() {
+      if (state.batchPlan === null) return
+      state.batchPlan = null
+      publish()
+    }
+
+    /** Files offered across the whole checklist. */
+    function batchPlanFiles(plan) {
+      const rows = []
+      for (const session of plan.sessions) {
+        if (session.plan === null) continue
+        for (const row of batchRows(session.plan, plan.scope)) rows.push({ session, row })
+      }
+      return rows
+    }
+
+    /** The rows one session offers at the current scope. */
+    function batchRows(plan, scope) {
+      if (plan === null || plan === undefined) return []
+      return scope === 'all' ? [...plan.created, ...plan.modified] : [...plan.created]
+    }
+
+    function toggleBatchSession(session) {
+      const rows = batchRows(session.plan, state.batchPlan === null ? 'created' : state.batchPlan.scope)
+      const all = rows.every((row) => session.selected.has(row.path))
+      for (const row of rows) {
+        if (all) session.selected.delete(row.path)
+        else session.selected.add(row.path)
+      }
+      publish()
+    }
+
+    function toggleBatchAll() {
+      const plan = state.batchPlan
+      if (plan === null) return
+      const files = batchPlanFiles(plan)
+      const all = files.every(({ session, row }) => session.selected.has(row.path))
+      for (const { session, row } of files) {
+        if (all) session.selected.delete(row.path)
+        else session.selected.add(row.path)
+      }
+      publish()
+    }
+
+    /** Confirm the checklist: run the delete with each session's own file list. */
+    function confirmBatchPlan() {
+      const plan = state.batchPlan
+      if (plan === null || plan.scanning) return
+      const paths = {}
+      for (const session of plan.sessions) {
+        // A session whose scan failed carries no list, and an empty array means
+        // "move nothing" - so it is left out entirely and its files stay put.
+        if (session.error !== null) continue
+        paths[session.id] = [...session.selected]
+      }
+      state.batchPlan = null
+      publish()
+      runBatchDelete(paths)
+    }
+
+    function runBatchDelete(pathsById) {
       if (state.batch !== null) return
       const ids = [...state.selected]
       if (ids.length === 0) return
@@ -1796,11 +1986,23 @@ window.__ModuleLoader__.load({
 
       // The same switch the single path honours; without this every request went
       // out with no `quarantine` field and the files stayed where they were.
-      const quarantine = quarantinePlan()
-      // The feature is on but `auto` is off: the user expects files to be handled
-      // and a batch cannot show the per-file checklist. Say so afterwards rather
-      // than pretending the files were dealt with.
-      const askOnly = !artifactsOff() && !artifactsAuto()
+      //
+      // In asking mode the checklist already produced an explicit list per session
+      // (issue #4): sending `{ scope }` there would move the whole derived set and
+      // quietly ignore what the user ticked.
+      const derived = quarantinePlan()
+      const listed = pathsById !== undefined && pathsById !== null
+      const scope = artifactScope()
+      const skipGit = skipGitRepos()
+      const quarantineFor = (id) => {
+        if (!listed) return derived
+        const paths = pathsById[id]
+        if (!Array.isArray(paths)) return undefined
+        return { scope, paths, skipGit }
+      }
+      // Asking mode with no checklist (the caller skipped it) still has to be
+      // honest about the files it is not moving.
+      const askOnly = !listed && !artifactsOff() && !artifactsAuto()
       let movedFiles = 0
       let failedFiles = 0
       const failedIds = []
@@ -1812,7 +2014,7 @@ window.__ModuleLoader__.load({
           if (index >= ids.length) return
           const id = ids[index]
           try {
-            const result = await postDelete(id, quarantine)
+            const result = await postDelete(id, quarantineFor(id))
             const outcome = result && result.quarantine ? result.quarantine : null
             if (outcome !== null) {
               movedFiles += outcome.moved.length
@@ -2429,6 +2631,151 @@ window.__ModuleLoader__.load({
       return h('div', { key: 'artifacts', className: 'dsdel-artifacts' }, elements)
     }
 
+    /**
+     * The batch file checklist (issue #4).
+     *
+     * Asking mode gives the single delete a per-file list inside its confirmation
+     * dialog. A batch has no such dialog, so the equivalent is one aggregated list
+     * over every selected session, shown before anything is deleted. Sessions are
+     * grouped so the user can tell whose files are whose, and a session with
+     * nothing to move is listed rather than hidden - "this one has no produced
+     * files" is information, not noise.
+     */
+    function BatchPlanDialog({ t: injected }) {
+      const translate = localizedTranslator(injected)
+      const view = useSnapshot()
+      const plan = view.batchPlan
+      if (plan === null) return null
+
+      const files = batchPlanFiles(plan)
+      const picked = files.filter(({ session, row }) => session.selected.has(row.path)).length
+      const children = []
+
+      if (plan.error !== null) {
+        children.push(h('p', { key: 'error', className: 'dsdel-modal-error', role: 'alert' }, plan.error))
+      }
+
+      // The overall progress line. Scanning every session is a real wait on a
+      // long selection, and a dialog that appears frozen reads as a hang.
+      if (plan.scanning) {
+        children.push(h('p', { key: 'scanning', className: 'dsdel-modal-meta' },
+          translate('batchPlanScanning', plan.scanned, plan.sessions.length)))
+      } else {
+        children.push(h('p', { key: 'summary', className: 'dsdel-modal-meta' },
+          translate('batchPlanSummary', plan.sessions.length, files.length)))
+      }
+
+      // One line for the whole list: ticking them one by one across twenty
+      // sessions is the thing that made the single dialog worth having.
+      if (files.length > 0) {
+        children.push(h('div', { key: 'all', className: 'dsdel-file-row' },
+          h('label', { key: 'label', className: 'dsdel-file-label' },
+            h('input', {
+              type: 'checkbox',
+              className: 'dsdel-batch-all',
+              checked: picked === files.length,
+              onChange: () => toggleBatchAll(),
+            }),
+            h('span', { key: 'text', className: 'dsdel-file-path' },
+              translate('batchPlanAll', picked, files.length)),
+          ),
+        ))
+      }
+
+      for (const session of plan.sessions) {
+        const rows = batchRows(session.plan, plan.scope)
+        const label = session.title === null || session.title === undefined
+          ? session.id
+          : `${session.title}  ·  ${session.id}`
+        children.push(h('p', {
+          key: `head:${session.id}`,
+          className: 'dsdel-modal-text',
+          style: { marginTop: '10px', fontWeight: 600 },
+        }, label))
+
+        if (session.loading) {
+          children.push(h('p', { key: `load:${session.id}`, className: 'dsdel-modal-meta' },
+            translate('artifactLoading')))
+          continue
+        }
+        if (session.error !== null) {
+          children.push(h('p', { key: `err:${session.id}`, className: 'dsdel-modal-error', role: 'alert' },
+            translate('artifactFailed') + session.error))
+          continue
+        }
+        if (rows.length === 0) {
+          children.push(h('p', { key: `none:${session.id}`, className: 'dsdel-modal-meta' },
+            translate('artifactNone')))
+          continue
+        }
+
+        const all = rows.every((row) => session.selected.has(row.path))
+        children.push(h('div', { key: `all:${session.id}`, className: 'dsdel-file-row' },
+          h('label', { key: 'label', className: 'dsdel-file-label' },
+            h('input', {
+              type: 'checkbox',
+              checked: all,
+              onChange: () => toggleBatchSession(session),
+            }),
+            h('span', { key: 'text', className: 'dsdel-file-path' },
+              translate('batchPlanSession', session.selected.size, rows.length)),
+          ),
+        ))
+        for (const row of rows.slice(0, ARTIFACT_ROWS_SHOWN)) {
+          children.push(h('div', {
+            key: `row:${session.id}:${row.path}`,
+            'data-file-row': row.path,
+            className: 'dsdel-file-row dsdel-batch-row',
+          },
+            h('label', { key: 'label', className: 'dsdel-file-label' },
+              h('input', {
+                type: 'checkbox',
+                checked: session.selected.has(row.path),
+                onChange: (e) => {
+                  if (e && e.target && e.target.checked) session.selected.add(row.path)
+                  else session.selected.delete(row.path)
+                  publish()
+                },
+              }),
+              h('span', { key: 'path', className: 'dsdel-file-path' }, row.displayPath || row.path),
+            ),
+          ))
+        }
+        if (rows.length > ARTIFACT_ROWS_SHOWN) {
+          children.push(h('p', { key: `more:${session.id}`, className: 'dsdel-modal-meta' },
+            translate('artifactMore', rows.length - ARTIFACT_ROWS_SHOWN)))
+        }
+        if (session.plan.refused !== undefined && session.plan.refused.length > 0) {
+          children.push(h('p', { key: `ref:${session.id}`, className: 'dsdel-modal-meta' },
+            translate('artifactRefused', session.plan.refused.length)))
+        }
+      }
+
+      return h(primitives.Modal, {
+        open: true,
+        onClose: () => closeBatchPlan(),
+        closeLabel: translate('cancel'),
+        title: translate('batchPlanTitle'),
+        footer: [
+          h(primitives.Button, {
+            key: 'cancel',
+            variant: 'outline',
+            onClick: () => closeBatchPlan(),
+            children: translate('cancel'),
+          }),
+          h(primitives.Button, {
+            key: 'confirm',
+            variant: 'outline',
+            className: 'dsdel-danger-btn',
+            disabled: plan.scanning,
+            onClick: () => confirmBatchPlan(),
+            children: translate('confirm'),
+          }),
+        ],
+        children,
+      })
+    }
+
     /** Folder picker overlay: walk directories, then commit one. */
     function QuarantinePicker({ t: injected }) {
       const translate = localizedTranslator(injected)
@@ -2938,6 +3285,12 @@ window.__ModuleLoader__.load({
         slots.inject('shell.overlay', () => slots.register(
           { name: 'shell.overlay', id: `${NS}-picker`, order: 1, locale: NS },
           QuarantinePicker,
+        ))
+        // The batch file checklist: the aggregated list asking mode shows before
+        // it deletes several sessions (issue #4).
+        slots.inject('shell.overlay', () => slots.register(
+          { name: 'shell.overlay', id: `${NS}-batchplan`, order: 2, locale: NS },
+          BatchPlanDialog,
         ))
         // The plugin page card, on BOTH seats the manager offers.
         //
