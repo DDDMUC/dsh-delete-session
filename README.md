@@ -162,6 +162,12 @@ MIT
 
 ## 修复记录
 
+**（v0.3.3）** —— 删除当前会话不再顺手新建一个会话。
+
+- **问题**：删掉正在看的那个会话之后，`leaveIfCurrent()` 会去侧边栏点「新建会话」按钮，好让主视图别停在那个禁用的合成器上。可那个按钮是**用户**新建会话的入口，凡是拦截「新建会话」的插件（命名弹窗、模板选择、预设工作区）都会跟着触发 —— 结果是「删了一个会话」被做成了「新建一个会话」（[#5](https://github.com/DDDMUC/dsh-delete-session/issues/5)）。
+- **改用宿主的 `uiWorkspace.clearMain()`**：放掉主引用、释放 retain、把持久化的 `dsh.sessions.current` 一并复位、清空面板。宿主自己就用它表达「没有当前会话」—— 归档当前会话走它，`startSession` 拿不到工作区也走它。
+- **顺带去掉两个副作用**：不再需要 `localStorage.removeItem('dsh.sessions.current')`（`clearMain` 已经复位），也不再需要 `location.reload()`。
+- **旧宿主仍有兜底**：`uiWorkspace` 拿不到（或没有 `clearMain`）时才退回原来的按钮点击 + 重置指针 + reload，保证视图不会停在已删的会话上。服务本身经 `ctx.get` 查一次、拿不到再 `ctx.inject` 补挂。
 **（v0.3.2）** —— 语言跟随 DSH 的界面语言，而不是操作系统。
 
 - **问题**：插件的语言只认 `navigator.language`。OS 是英文、DSH 设成中文的用户，看到的是全英文界面，而且没有任何办法改（[#3](https://github.com/DDDMUC/dsh-delete-session/issues/3)）。

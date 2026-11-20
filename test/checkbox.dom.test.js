@@ -188,6 +188,12 @@ function walk(root) {
 }
 
 function matches(node, selector) {
+  // A comma list is an OR in the DOM, and the plugin uses one to find the
+  // "new session" button. Without this the stub silently answered "no match"
+  // for every alternative, which hid the fallback path entirely.
+  if (selector.includes(',')) {
+    return selector.split(',').some((part) => matches(node, part.trim()))
+  }
   // `:scope > .dsdel-check` - a DIRECT child. The plugin uses this to tell its
   // own row checkbox apart from anything nested, so depth has to be respected.
   const scoped = /^:scope > \.([\w-]+)$/.exec(selector)
@@ -199,6 +205,23 @@ function matches(node, selector) {
 
   if (selector.startsWith('.') && !selector.includes(':') && !selector.includes('[')) {
     return node._classes.has(selector.slice(1))
+  }
+
+  // `button[class*="newSession"]` - tag-qualified, used by the fallback that
+  // finds the host's "new session" button after a delete.
+  const tagClassContains = /^([A-Za-z][\w-]*)\[class\*="([^"]*)"\]$/.exec(selector)
+  if (tagClassContains !== null) {
+    if (String(node.tagName || '').toLowerCase() !== tagClassContains[1].toLowerCase()) return false
+    return String(node.className ?? '').includes(tagClassContains[2])
+  }
+
+  // `button[aria-label*="New session" i]` - a case-insensitive attribute match.
+  const tagAttrContains = /^([A-Za-z][\w-]*)\[([\w-]+)\*="([^"]*)"(?: i)?\]$/.exec(selector)
+  if (tagAttrContains !== null) {
+    if (String(node.tagName || '').toLowerCase() !== tagAttrContains[1].toLowerCase()) return false
+    const value = node.attributes[tagAttrContains[2]]
+    if (typeof value !== 'string') return false
+    return value.toLowerCase().includes(tagAttrContains[3].toLowerCase())
   }
 
   // `[class*="_footArea"]` - how the bar finds the host's sidebar footer.
@@ -457,12 +480,16 @@ async function loadPlugin(options = {}) {
       // `lateLocale` models a host where the locale service is only reachable
       // through ctx.inject, which is the path that used to skip registration.
       if (name === 'locale') return (options.lateLocale || options.noLocale) ? null : localeStub
+      if (name === 'uiWorkspace') return options.noNavigation ? null : (options.navigation || null)
       return null
     },
     inject: (names, cb) => {
       if (typeof cb === 'function') {
         const late = options.lateLocale && !options.noLocale
-        cb(late ? { slots: slotsStub, locale: localeStub } : { slots: slotsStub })
+        const bag = { slots: slotsStub }
+        if (late) bag.locale = localeStub
+        if (options.navigation && !options.noNavigation) bag.uiWorkspace = options.navigation
+        cb(bag)
       }
     },
     effect: (fn) => { const dispose = fn(); return () => { if (typeof dispose === 'function') dispose() } },
@@ -874,6 +901,68 @@ test('shift-click forces the dialog even after asking was turned off', async () 
 
 // --- the regression ---------------------------------------------------------
 
+test('deleting the current session clears the main view instead of opening a new one (issue #5)', async () => {
+  let cleared = 0
+  const harness = await loadPlugin({
+    navigation: { clearMain: () => { cleared += 1 } },
+  })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: SESSION_A.id }))
+
+  // The host's own session menu row drives the delete; asking is off so it goes
+  // straight through, like the reporter did.
+  localStorage.setItem(SKIP_KEY, '1')
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await flush()
+
+  // Issue #5: this used to click the sidebar's "new session" button, which every
+  // plugin that intercepts session creation shares (a naming dialog, a template
+  // picker). Deleting a conversation must not create one.
+  assert.equal(cleared, 1, 'the host was told to drop the main reference')
+  assert.equal(harness.requests.filter((c) => c.url === '/dsh-delete-session/delete').length, 1, 'the delete still went out')
+})
+
+test('a delete that is not the current session leaves navigation alone', async () => {
+  let cleared = 0
+  const harness = await loadPlugin({
+    navigation: { clearMain: () => { cleared += 1 } },
+  })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: SESSION_B.id }))
+  localStorage.setItem(SKIP_KEY, '1')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await flush()
+
+  assert.equal(cleared, 0, 'nothing to clear: the deleted one was not on screen')
+})
+
+test('with no navigation service the sidebar button is the last resort', async () => {
+  const harness = await loadPlugin({ noNavigation: true })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: SESSION_A.id }))
+  localStorage.setItem(SKIP_KEY, '1')
+
+  // A host that predates `clearMain` still has to end up with no current
+  // conversation, so the old fallback stays. It is only reached when the service
+  // is genuinely absent.
+  let clicked = 0
+  const btn = harness.document.createElement('button')
+  btn.className = 'newSession'
+  btn.click = () => { clicked += 1 }
+  harness.document.body.appendChild(btn)
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await flush()
+
+  assert.equal(clicked, 1, 'the fallback still runs without the service')
+})
 test('a single delete plants no checkbox on any row (the v0.1.8 regression)', async () => {
   const harness = await loadPlugin()
   mountRow(harness, SESSION_A)

@@ -358,6 +358,10 @@ window.__ModuleLoader__.load({
 
     let sessionsSvc = null
     let localeSvc = null
+    /** `uiWorkspace`: the host's own "this conversation is closed" face. */
+    let navigationSvc = null
+    /** Kept so the navigation service can be looked up lazily, outside apply(). */
+    let hostCtx = null
 
     /** Languages this plugin ships dictionaries for. */
     const SHIPPED = ['zh', 'en', 'ru']
@@ -920,11 +924,32 @@ window.__ModuleLoader__.load({
       try { window.location.reload() } catch { /* ignore */ }
     }
 
-    // Deleting the session the main view is showing leaves the app to restore a
-    // stale neighbour (an unavailable Agent Team row with a disabled composer),
-    // which reads as "the delete did not work". Open a fresh session instead.
+    // Deleting the session the main view is showing has to leave the app with no
+    // current conversation. It used to click the sidebar's "new session" button,
+    // which is wrong twice over: that button is the USER entry point, so every
+    // plugin that intercepts a new session (a naming dialog, a template picker,
+    // a preset workspace) fires on a delete; and the visible result of a delete
+    // became "a new conversation was created".
+    //
+    // The host has a way to express exactly this: `uiWorkspace.clearMain()`
+    // drops the main reference, releases its retain, resets the persisted
+    // `dsh.sessions.current` pointer and clears the panel. Archiving the current
+    // conversation and a failed `startSession` both go through it, so it is the
+    // sanctioned "nothing is open" state rather than a side effect of ours.
     function deletedVariants(id) {
       return id.startsWith('session-') ? [id, id.slice('session-'.length)] : [id, `session-${id}`]
+    }
+
+    /** The navigation service, looked up lazily so a late one is still found. */
+    function navigationApi() {
+      if (navigationSvc !== null) return navigationSvc
+      const holder = hostCtx
+      if (holder === null || typeof holder.get !== 'function') return navigationSvc
+      try {
+        const svc = holder.get('uiWorkspace')
+        if (svc !== null && svc !== undefined) navigationSvc = svc
+      } catch { /* optional service */ }
+      return navigationSvc
     }
 
     function leaveIfCurrent(id) {
@@ -936,6 +961,18 @@ window.__ModuleLoader__.load({
         return
       }
       if (!current || !deletedVariants(id).includes(current)) return
+
+      // Preferred: tell the host, which owns the pointer and the retain.
+      const api = navigationApi()
+      if (api !== null && typeof api.clearMain === 'function') {
+        try {
+          api.clearMain()
+          return
+        } catch { /* older build: fall through */ }
+      }
+
+      // No such service (a host that predates it): the old route, kept so the
+      // view is never left pointing at a conversation that no longer exists.
       const btn = document.querySelector(
         'button[class*="newSession"], button[aria-label*="New session" i], button[aria-label*="新会话"]',
       )
@@ -2770,11 +2807,23 @@ window.__ModuleLoader__.load({
         }
       }
 
+      hostCtx = ctx
       sessionsSvc = ctx.get('sessions') || null
       if (!sessionsSvc) {
         try { ctx.inject(['sessions'], (sub) => { sessionsSvc = sub.sessions }) } catch { /* optional */ }
       }
       localeSvc = ctx.get('locale') || null
+      // `uiWorkspace` is a service, not a module: `ctx.get` is an optional lookup,
+      // and a host that provides it later is covered by the inject below.
+      try {
+        const nav = ctx.get('uiWorkspace')
+        if (nav !== null && nav !== undefined) navigationSvc = nav
+      } catch { /* optional service */ }
+      if (navigationSvc === null) {
+        try {
+          ctx.inject(['uiWorkspace'], (sub) => { navigationSvc = sub.uiWorkspace || null })
+        } catch { /* optional service */ }
+      }
 
       // Slot components are handed a `t` bound to this namespace, so the
       // dictionaries must reach the host - on BOTH arrival paths. If `locale`
