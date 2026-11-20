@@ -73,6 +73,9 @@ window.__ModuleLoader__.load({
       starCta: '行，给你一颗 Star',
       pageSyncChildrenOn: '删除对话时，把它派生的子代理会话一起删掉。',
       pageSyncChildrenOff: '不勾选时，删除前会列出子会话，由你勾选要删哪些。',
+      pageReplaceCurrent: '删完打开一个新会话',
+      pageReplaceCurrentOn: '删掉的如果正是当前打开的那个，顺手开一个新的，主视图不会空着。',
+      pageReplaceCurrentOff: '删掉的如果正是当前打开的那个，主视图留空，什么都不新建。',
       childrenHint: '这个对话有 {n} 个子会话（子代理），勾选的会一起删除。',
       pageRecycleOn: '删除后放进系统回收站，可以还原。',
       pageRecycleOff: '删除后直接从硬盘移除，不可恢复。',
@@ -182,6 +185,9 @@ window.__ModuleLoader__.load({
       starCta: 'Fine — have one',
       pageSyncChildrenOn: 'A delete also removes the subagent sessions it spawned.',
       pageSyncChildrenOff: 'When off, the dialog lists the child sessions and you tick the ones to delete.',
+      pageReplaceCurrent: 'Open a new conversation after deleting',
+      pageReplaceCurrentOn: 'If the conversation you are viewing is the one deleted, a fresh one opens instead of leaving the view blank.',
+      pageReplaceCurrentOff: 'If the conversation you are viewing is the one deleted, the view stays blank and nothing is created.',
       childrenHint: 'This conversation has {n} child sessions (subagents). Ticked ones are deleted too.',
       pageRecycleOn: 'The session goes to the system trash and can be restored.',
       pageRecycleOff: 'The session is removed from the disk right away and cannot be restored.',
@@ -288,6 +294,9 @@ window.__ModuleLoader__.load({
       starCta: 'Ладно, держи звезду',
       pageSyncChildrenOn: 'Удаление сессии удаляет и порождённые ею сессии субагентов.',
       pageSyncChildrenOff: 'Если выключено, перед удалением появится список дочерних сессий и вы отметите, какие удалить.',
+      pageReplaceCurrent: 'Открывать новый диалог после удаления',
+      pageReplaceCurrentOn: 'Если удалён тот диалог, который открыт, вместо пустого экрана откроется новый.',
+      pageReplaceCurrentOff: 'Если удалён тот диалог, который открыт, экран останется пустым, ничего не создаётся.',
       childrenHint: 'У этого диалога {n} дочерних сессий (субагентов). Отмеченные удалятся вместе с ним.',
       pageRecycleOn: 'Сессия попадёт в системную корзину, её можно восстановить.',
       pageRecycleOff: 'Сессия сразу удаляется с диска, восстановить её нельзя.',
@@ -623,6 +632,8 @@ window.__ModuleLoader__.load({
     const RECYCLE_KEY = 'dsh-delete-session:recycle'
     /** Whether a delete takes the subagent sessions with it, without asking. */
     const SYNC_CHILDREN_KEY = 'dsh-delete-session:sync-children'
+    /** Whether deleting the open conversation opens a fresh one afterwards. */
+    const REPLACE_KEY = 'dsh-delete-session:replace-current'
     /** How many artifact rows the dialog lists before collapsing the rest. */
     const ARTIFACT_ROWS_SHOWN = 40
     const prefListeners = new Set()
@@ -726,6 +737,23 @@ window.__ModuleLoader__.load({
      */
     function syncChildren() {
       return readPref(SYNC_CHILDREN_KEY, '1') !== '0'
+    }
+
+    /**
+     * Whether a delete of the OPEN conversation is followed by a new one.
+     *
+     * On by default: a DSH sitting on a deleted conversation is a dead end, and
+     * most people would rather keep working than stare at an empty screen. It is
+     * a choice, though - "leave me on a blank view" has to be reachable.
+     */
+    function replaceCurrent() {
+      return readPref(REPLACE_KEY, '1') !== '0'
+    }
+
+    function setReplaceCurrent(on) {
+      // Written as '0' rather than cleared, like the child-session switch: the
+      // default is on, so a removed key would read back as on again.
+      writePref(REPLACE_KEY, on ? '1' : '0')
     }
 
     function setSyncChildren(on) {
@@ -962,8 +990,18 @@ window.__ModuleLoader__.load({
       }
       if (!current || !deletedVariants(id).includes(current)) return
 
-      // Preferred: tell the host, which owns the pointer and the retain.
       const api = navigationApi()
+
+      // The switch is a real choice: open a fresh conversation, or leave the view
+      // blank. Both go through the host - neither guesses at a button.
+      if (replaceCurrent() && api !== null && typeof api.startSession === 'function') {
+        try {
+          api.startSession()
+          return
+        } catch { /* older build: fall through to clearing */ }
+      }
+
+      // Tell the host, which owns the pointer and the retain.
       if (api !== null && typeof api.clearMain === 'function') {
         try {
           api.clearMain()
@@ -2559,6 +2597,7 @@ window.__ModuleLoader__.load({
       const [ask, setAsk] = react.useState(!skipConfirm())
       const [recycle, setRecycle] = react.useState(recycleSession())
       const [syncChildrenState, setSyncChildrenState] = react.useState(syncChildren())
+      const [replaceState, setReplaceState] = react.useState(replaceCurrent())
       const [off, setOff] = react.useState(artifactsOff())
       const [auto, setAuto] = react.useState(artifactsAuto())
       const [scope, setScope] = react.useState(artifactScope())
@@ -2567,6 +2606,7 @@ window.__ModuleLoader__.load({
       react.useEffect(() => subscribeSkip(() => setAsk(!skipConfirm())), [])
       react.useEffect(() => { loadDefaultRoot() }, [])
       react.useEffect(() => subscribePrefs(() => {
+        setReplaceState(replaceCurrent())
         setOff(artifactsOff())
         setAuto(artifactsAuto())
         setScope(artifactScope())
@@ -2616,6 +2656,18 @@ window.__ModuleLoader__.load({
         }),
         h('p', { key: 'syncChildrenHint', className: 'dsdel-page-hint' },
           translate(syncChildrenState ? 'pageSyncChildrenOn' : 'pageSyncChildrenOff')),
+
+        h(primitives.Checkbox, {
+          key: 'replaceCurrent',
+          checked: replaceState,
+          label: translate('pageReplaceCurrent'),
+          onChange: (checked) => {
+            setReplaceState(checked === true)
+            setReplaceCurrent(checked === true)
+          },
+        }),
+        h('p', { key: 'replaceCurrentHint', className: 'dsdel-page-hint' },
+          translate(replaceState ? 'pageReplaceCurrentOn' : 'pageReplaceCurrentOff')),
 
         h(primitives.Checkbox, {
           key: 'off',
@@ -2760,7 +2812,7 @@ window.__ModuleLoader__.load({
       // Each control owns the nodes that explain it. Grouping them here keeps the
       // markup above flat (a switch and its hint are still two pushes) while the
       // page draws them as one block.
-      const FIELD_KEYS = new Set(['ask', 'recycle', 'syncChildren', 'off', 'auto', 'scope', 'skipGit', 'root'])
+      const FIELD_KEYS = new Set(['ask', 'recycle', 'syncChildren', 'replaceCurrent', 'off', 'auto', 'scope', 'skipGit', 'root'])
       function groupFields(nodes) {
         const groups = []
         let current = null

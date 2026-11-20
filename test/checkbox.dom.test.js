@@ -963,6 +963,72 @@ test('with no navigation service the sidebar button is the last resort', async (
 
   assert.equal(clicked, 1, 'the fallback still runs without the service')
 })
+test('by default a delete of the open conversation opens a fresh one', async () => {
+  const calls = []
+  const harness = await loadPlugin({
+    navigation: {
+      startSession: () => { calls.push('startSession') },
+      clearMain: () => { calls.push('clearMain') },
+    },
+  })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: SESSION_A.id }))
+  localStorage.setItem(SKIP_KEY, '1')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await flush()
+
+  assert.deepEqual(calls, ['startSession'], 'one fresh conversation, nothing cleared')
+})
+
+test('turning the switch off leaves the view blank instead', async () => {
+  const calls = []
+  const harness = await loadPlugin({
+    navigation: {
+      startSession: () => { calls.push('startSession') },
+      clearMain: () => { calls.push('clearMain') },
+    },
+  })
+  localStorage.setItem('dsh-delete-session:replace-current', '0')
+  mountRow(harness, SESSION_A)
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: SESSION_A.id }))
+  localStorage.setItem(SKIP_KEY, '1')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await flush()
+
+  assert.deepEqual(calls, ['clearMain'], 'the switch is a real choice')
+})
+
+test('a host without startSession still ends up with a blank view', async () => {
+  const calls = []
+  const harness = await loadPlugin({
+    navigation: { clearMain: () => { calls.push('clearMain') } },
+  })
+  mountRow(harness, SESSION_A)
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: SESSION_A.id }))
+  localStorage.setItem(SKIP_KEY, '1')
+
+  const { element } = deleteRow(harness)
+  element.props.onSelect({ shiftKey: false })
+  await tick()
+  await flush()
+
+  assert.deepEqual(calls, ['clearMain'], 'no fresh session available, so clear')
+})
+
+test('the replace-current switch renders on the plugin page', async () => {
+  const harness = await loadPlugin()
+  const card = pageCard(harness)
+  const fields = (card.props.children ?? []).filter((node) => node && node.props && node.props.className === 'dsdel-field')
+
+  // Five switches: ask / recycle / syncChildren / replaceCurrent / artifacts.
+  assert.ok(fields.length >= 5, 'the new switch became its own block, saw ' + fields.length)
+})
 test('a single delete plants no checkbox on any row (the v0.1.8 regression)', async () => {
   const harness = await loadPlugin()
   mountRow(harness, SESSION_A)
@@ -1356,7 +1422,7 @@ test('the produced-files feature ships off: no scan, no section, no quarantine f
 
 test('the page hides the artifact sub-controls while the master switch is on', async () => {
   const harness = await loadPlugin()
-  assert.equal(pageChecks(harness).length, 4, 'ask, recycle, subagents and the master switch render')
+  assert.equal(pageChecks(harness).length, 5, 'ask, recycle, subagents, replace-current and the master switch render')
   assert.equal(offCheckbox(harness).props.checked, true, 'the master switch starts ticked')
 })
 
@@ -1365,7 +1431,7 @@ test('clearing the master switch reveals the auto and scope controls', async () 
   offCheckbox(harness).props.onChange(false)
 
   assert.equal(localStorage.getItem(OFF_KEY), '0', 'the opt-in was stored')
-  assert.equal(pageChecks(harness).length, 8, 'the sub-controls render once enabled')
+  assert.equal(pageChecks(harness).length, 9, 'the sub-controls render once enabled')
   assert.equal(autoCheckbox(harness).props.checked, false, 'asking is the default once enabled')
   assert.equal(scopeCreatedCheckbox(harness).props.checked, true, 'created-only is the default scope')
   assert.equal(scopeAllCheckbox(harness).props.checked, false)
