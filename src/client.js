@@ -3340,6 +3340,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    return { apply }
+    return { apply, __settings: { SettingsCard: AskBeforeDeleteOption } }
   },
 })
