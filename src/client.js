@@ -1135,7 +1135,7 @@ window.__ModuleLoader__.load({
       '.dsdel-setting{position:relative;display:flex;align-items:flex-start;gap:16px;padding:12px 0;width:100%}',
       '.dsdel-setting-text{flex:1;min-width:0}',
       '.dsdel-setting-title{font-size:13px;font-weight:600;line-height:20px}',
-      '.dsdel-setting-desc{position:absolute;left:0;top:100%;z-index:6;max-width:min(560px,100%);margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid rgba(0,0,0,.08);background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:0 6px 20px rgba(0,0,0,.10);font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#666);opacity:0;pointer-events:none;transition:opacity .12s}',
+      '.dsdel-setting-desc{position:absolute;left:0;top:100%;z-index:6;max-width:min(560px,100%);margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid rgba(0,0,0,.08);background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:0 6px 20px rgba(0,0,0,.10);font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary,#111);opacity:0;pointer-events:none;transition:opacity .12s}',
       '.dsdel-setting:hover .dsdel-setting-desc{opacity:1}',
       '.dsdel-switch{position:relative;flex:none;width:38px;height:22px;margin-left:auto;border:0;border-radius:11px;padding:0;cursor:pointer;background:rgba(127,127,127,.4);transition:background .12s ease}',
       '.dsdel-switch[aria-checked="true"]{background:#4c8dff}',
