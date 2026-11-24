@@ -2354,14 +2354,17 @@ test('the page ends with a quiet link to the repository', async () => {
   const star = findByKey(card.props.children, 'star')[0]
 
   assert.ok(star, 'the star line renders with the card')
+  assert.equal(star.type, 'a', 'the whole banner is the link')
   assert.match(star.props.className, /dsdel-star\b/)
+  assert.equal(star.props.href, 'https://github.com/DDDMUC/dsh-delete-session')
+  assert.equal(star.props.target, '_blank')
+  assert.equal(star.props.rel, 'noreferrer')
 
-  const [ask, cta] = star.props.children
-  assert.equal(ask.props.children, '⭐ 顺手留颗 Star，作者能高兴一整天')
-  assert.equal(cta.type, 'a', 'the call to action is a real link')
-  assert.equal(cta.props.href, 'https://github.com/DDDMUC/dsh-delete-session')
-  assert.equal(cta.props.target, '_blank')
-  assert.equal(cta.props.rel, 'noreferrer')
+  const [icon, ask, cta] = star.props.children
+  assert.match(icon.props.className, /dsdel-star-icon/, 'the icon is its own span, so the copy carries no emoji')
+  assert.equal(icon.props.children, '⭐')
+  assert.equal(ask.props.children, '顺手留颗 Star，作者能高兴一整天')
+  assert.match(cta.props.className, /dsdel-star-cta/, 'the call to action sits at the far end')
   assert.equal(cta.props.children, '行，给你一颗 Star')
 })
 
