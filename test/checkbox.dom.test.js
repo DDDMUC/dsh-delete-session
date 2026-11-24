@@ -1069,10 +1069,11 @@ test('a host without startSession still ends up with a blank view', async () => 
 test('the replace-current switch renders on the plugin page', async () => {
   const harness = await loadPlugin()
   const card = pageCard(harness)
-  const fields = (card.props.children ?? []).filter((node) => node && node.props && node.props.className === 'dsdel-field')
+  const switches = collectSwitches(card.props.children, [])
 
   // Five switches: ask / recycle / syncChildren / replaceCurrent / artifacts.
-  assert.ok(fields.length >= 5, 'the new switch became its own block, saw ' + fields.length)
+  assert.ok(switches.length >= 5, 'the new switch became its own row, saw ' + switches.length)
+  assert.ok(switches.some((node) => node.props.key === 'replaceCurrent'), 'replace-current is one of them')
 })
 test('a single delete plants no checkbox on any row (the v0.1.8 regression)', async () => {
   const harness = await loadPlugin()
@@ -1323,7 +1324,19 @@ const collectChecks = (nodes, harness, out = []) => {
   return out
 }
 const pageChecks = (harness) => collectChecks(pageCard(harness).props.children, harness)
-const pageCheckbox = (harness) => pageChecks(harness)[0]
+const collectSwitches = (nodes, out = []) => {
+  for (const node of nodes || []) {
+    if (node === null || node === undefined || !node.props) continue
+    if (node.props.role === 'switch' && node.props.className === 'dsdel-switch') out.push(node)
+    else if (Array.isArray(node.props.children)) collectSwitches(node.props.children, out)
+  }
+  return out
+}
+/** Every on/off control the page draws as a switch. */
+const pageSwitches = (harness) => collectSwitches(pageCard(harness).props.children)
+/** A switch reads on/off from aria-checked, the way a screen reader does. */
+const isOn = (node) => node.props['aria-checked'] === 'true'
+const pageCheckbox = (harness) => pageCheck(harness, 'ask')
 // Selected by their key, not by position: adding a switch to the card must not
 // silently retarget these assertions at a different control.
 const pageCheck = (harness, key) => findByKey(pageCard(harness).props.children, key)[0]
@@ -1364,7 +1377,7 @@ test('the row.config summary reports the artifact settings, not the ask toggle',
 test('the page checkbox starts ticked and unticking it deletes without a dialog', async () => {
   const harness = await loadPlugin()
   mountRow(harness, SESSION_A)
-  assert.equal(pageCheckbox(harness).props.checked, true, 'asking is the default')
+  assert.equal(isOn(pageCheckbox(harness)), true, 'asking is the default')
 
   pageCheckbox(harness).props.onChange(false)
   assert.equal(localStorage.getItem(SKIP_KEY), '1', 'unticking stores the opt-out')
@@ -1394,7 +1407,7 @@ test(
 
     assert.equal(dialogParts(harness).skip, null, "the dialog carries no don't-ask-again control")
     assert.equal(
-      pageCheckbox(harness).props.checked,
+      isOn(pageCheckbox(harness)),
       true,
       'and the page remains the only place the setting is read from',
     )
@@ -1467,8 +1480,8 @@ test('the produced-files feature ships off: no scan, no section, no quarantine f
 
 test('the page hides the artifact sub-controls while the master switch is on', async () => {
   const harness = await loadPlugin()
-  assert.equal(pageChecks(harness).length, 5, 'ask, recycle, subagents, replace-current and the master switch render')
-  assert.equal(offCheckbox(harness).props.checked, true, 'the master switch starts ticked')
+  assert.equal(pageSwitches(harness).length, 5, 'ask, recycle, subagents, replace-current and the master switch render')
+  assert.equal(isOn(offCheckbox(harness)), true, 'the master switch starts ticked')
 })
 
 test('clearing the master switch reveals the auto and scope controls', async () => {
@@ -1476,8 +1489,9 @@ test('clearing the master switch reveals the auto and scope controls', async () 
   offCheckbox(harness).props.onChange(false)
 
   assert.equal(localStorage.getItem(OFF_KEY), '0', 'the opt-in was stored')
-  assert.equal(pageChecks(harness).length, 9, 'the sub-controls render once enabled')
-  assert.equal(autoCheckbox(harness).props.checked, false, 'asking is the default once enabled')
+  assert.equal(pageSwitches(harness).length, 7, 'auto and skip-git join the five toggles')
+    assert.equal(pageChecks(harness).length, 2, 'the two scope choices stay checkboxes: they are one-of-two')
+  assert.equal(isOn(autoCheckbox(harness)), false, 'asking is the default once enabled')
   assert.equal(scopeCreatedCheckbox(harness).props.checked, true, 'created-only is the default scope')
   assert.equal(scopeAllCheckbox(harness).props.checked, false)
 })
@@ -2189,8 +2203,8 @@ test('skipping git repositories is on by default', async () => {
 
   const box = findByKey(pageCard(harness).props.children, 'skipGit')[0]
   assert.ok(box, 'the switch renders with the artifact controls')
-  assert.equal(box.props.checked, true, 'it starts on, so a project is never carried away by default')
-  assert.equal(box.props.label, '跳过 git 仓库内的文件')
+  assert.equal(isOn(box), true, 'it starts on, so a project is never carried away by default')
+  assert.equal(box.props['aria-label'], '跳过 git 仓库内的文件')
 })
 
 test('turning the git switch off is stored and sent with the delete', async () => {
@@ -2234,8 +2248,8 @@ test('deleting to the system trash is on by default', async () => {
   const harness = await loadPlugin()
   const box = recycleCheckbox(harness)
   assert.ok(box, 'the switch renders with the delete controls')
-  assert.equal(box.props.checked, true, 'a wrong click stays undoable until told otherwise')
-  assert.equal(box.props.label, '删除至回收站')
+  assert.equal(isOn(box), true, 'a wrong click stays undoable until told otherwise')
+  assert.equal(box.props['aria-label'], '删除至回收站')
 })
 
 test('the default sentence promises the Recycle Bin', async () => {
@@ -2288,8 +2302,8 @@ test('the page offers to take child sessions with their parent, on by default', 
   const box = pageCheck(harness, 'syncChildren')
 
   assert.ok(box, 'the switch renders with the other delete controls')
-  assert.equal(box.props.checked, true, 'taking them along is the default')
-  assert.equal(box.props.label, '同时删除子会话')
+  assert.equal(isOn(box), true, 'taking them along is the default')
+  assert.equal(box.props['aria-label'], '同时删除子会话')
 
   box.props.onChange(true)
   assert.equal(localStorage.getItem(SYNC_CHILDREN_KEY), '1', 'the choice is remembered')
@@ -2831,15 +2845,15 @@ test('a fresh install ticks all four delete switches', async () => {
   for (const [key, label, why] of expected) {
     const box = pageCheck(harness, key)
     assert.ok(box, key + ' renders')
-    assert.equal(box.props.label, label)
-    assert.equal(box.props.checked, true, why)
+    assert.equal(box.props['aria-label'], label)
+    assert.equal(isOn(box), true, why)
   }
 })
 
 test('unticking "take the child sessions along" is remembered', async () => {
   const harness = await loadPlugin()
   const box = pageCheck(harness, 'syncChildren')
-  assert.equal(box.props.checked, true, 'on by default')
+  assert.equal(isOn(box), true, 'on by default')
 
   box.props.onChange(false)
   // The default is now "on", so the off choice has to be written explicitly:
@@ -2870,15 +2884,18 @@ test('a fresh install deletes the children without listing them', async () => {
 test('the page card groups each switch with its hint in one field block', async () => {
   const harness = await loadPlugin()
   const card = pageCard(harness)
-  const fields = (card.props.children ?? []).filter(
-    (node) => node && node.props && node.props.className === 'dsdel-field',
-  )
-
+  const switches = collectSwitches(card.props.children, [])
   // Four switches at minimum: ask / recycle / syncChildren / artifacts-off.
-  assert.ok(fields.length >= 4, 'each control became its own block, saw ' + fields.length)
-  for (const field of fields) {
-    const inner = (field.props.children ?? []).filter(Boolean)
-    assert.ok(inner.length >= 1, 'the block holds the control')
+  assert.ok(switches.length >= 4, 'each control is its own row, saw ' + switches.length)
+  const rows = (card.props.children ?? []).filter(
+    (node) => node && node.props && node.props.className === 'dsdel-setting',
+  )
+  assert.ok(rows.length >= 4, 'and each lives in a title + explanation row')
+  for (const row of rows) {
+    const inner = (row.props.children ?? []).filter(Boolean)
+    assert.equal(inner.length, 2, 'a text block and the switch, nothing else')
+    assert.equal(inner[0].props.className, 'dsdel-setting-text')
+    assert.equal(inner[1].props.role, 'switch')
   }
 })
 
@@ -2890,8 +2907,8 @@ test('the shared tokens are declared once and used by the blocks', async () => {
   assert.match(css, /--dsdel-bg:/, 'a background token')
   assert.match(css, /--dsdel-border:/, 'a border token')
   assert.match(css, /--dsdel-ring:/, 'a focus ring token')
-  assert.match(css, /\.dsdel-field\{[^}]*border-radius/, 'the block is rounded')
-  assert.match(css, /\.dsdel-field:focus-within\{[^}]*outline/, 'and shows a focus ring')
+  assert.match(css, /\.dsdel-switch\{[^}]*border-radius/, 'the switch is rounded')
+  assert.match(css, /\.dsdel-switch:focus-visible\{[^}]*outline/, 'and shows a focus ring')
 })
 
 test('the toast follows the theme instead of the OS colour keywords', async () => {
@@ -2919,10 +2936,8 @@ test('the card is registered on the package page, so its URL has one segment', a
   assert.equal(bundleEntry.spec.key, NS, 'keyed by the package name')
 
   const rendered = bundleEntry.Component({ view: 'page' })
-  const fields = (rendered.props.children ?? []).filter(
-    (node) => node && node.props && node.props.className === 'dsdel-field',
-  )
-  assert.ok(fields.length >= 4, 'and it carries the same switches')
+  const switches = collectSwitches(rendered.props.children, [])
+  assert.ok(switches.length >= 4, 'and it carries the same switches')
 })
 
 test('the row page keeps its one-line summary', async () => {
