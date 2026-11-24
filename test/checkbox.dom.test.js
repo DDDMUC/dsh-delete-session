@@ -2839,7 +2839,7 @@ test('a fresh install ticks all four delete switches', async () => {
     ['ask', '删除时询问', 'ask first'],
     ['recycle', '删除至回收站', 'recycle bin'],
     ['syncChildren', '同时删除子会话', 'take the subagent sessions along'],
-    ['off', '不处理产出文件（保持当前行为）', 'leave produced files alone'],
+    ['off', '不处理产出文件', 'leave produced files alone'],
   ]
 
   for (const [key, label, why] of expected) {
